@@ -5,7 +5,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/takeout"
@@ -17,13 +16,16 @@ func cmdImport(args []string) error {
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
-	in := fs.Arg(0)
-	if in == "" {
-		in = filepath.Join(p.dataDir, "watch-history.json")
+	in, foundSubs, err := resolveExport(p, fs.Arg(0))
+	if err != nil {
+		return err
+	}
+	if *subsPath == "" {
+		*subsPath = foundSubs
 	}
 	f, err := os.Open(in)
 	if err != nil {
-		return fmt.Errorf("open export (hint: place your Takeout file at %s or pass a path): %w", in, err)
+		return fmt.Errorf("open export: %w", err)
 	}
 	defer f.Close()
 
@@ -65,6 +67,31 @@ func cmdImport(args []string) error {
 		fmt.Printf("  range:          %s .. %s\n", oldest.Format("2006-01-02"), newest.Format("2006-01-02"))
 	}
 	return importSubscriptions(p, *subsPath)
+}
+
+// resolveExport turns the import argument into a watch-history file path.
+// A directory argument — or none at all — is searched for known Takeout
+// layouts (e.g. "YouTube und YouTube Music/Verlauf/Wiedergabeverlauf.json"),
+// which also surfaces the subscriptions CSV when present.
+func resolveExport(p paths, arg string) (historyPath, subsPath string, err error) {
+	root := arg
+	if root == "" {
+		root = p.dataDir
+	}
+	st, statErr := os.Stat(root)
+	switch {
+	case statErr == nil && !st.IsDir():
+		return root, "", nil // explicit file argument
+	case statErr != nil && arg != "":
+		return "", "", fmt.Errorf("open export: %w", statErr)
+	case statErr != nil:
+		return "", "", fmt.Errorf("no data directory at %s — place your Takeout export there (see README)", root)
+	}
+	h, s := takeout.FindExport(root)
+	if h == "" {
+		return "", "", fmt.Errorf("no watch-history JSON found under %s — expected watch-history.json or Wiedergabeverlauf.json (Takeout: choose JSON format for history)", root)
+	}
+	return h, s, nil
 }
 
 // importSubscriptions is optional: without the CSV the report simply skips
