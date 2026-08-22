@@ -1,0 +1,87 @@
+[
+  {
+    "header": "YouTube",
+    "title": "Watched Rust Base Building Guide 2026",
+    "titleUrl": "https://www.youtube.com/watch?v=abc123DEF45",
+    "subtitles": [
+      { "name": "RustLetsPlayGuy", "url": "https://www.youtube.com/channel/UCrust000000000000000001" }
+    ],
+    "time": "2026-07-01T18:30:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "GopherCon 2025: Profile-Guided Optimization in Practice angesehen",
+    "titleUrl": "https://www.youtube.com/watch?v=def456GHI78",
+    "subtitles": [
+      { "name": "Gopher Academy", "url": "https://www.youtube.com/channel/UCgopher0000000000000001" }
+    ],
+    "time": "2026-07-02T09:15:30.123Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched CS2 Major Grand Final Highlights",
+    "titleUrl": "https://youtu.be/ghi789JKL01",
+    "subtitles": [
+      { "name": "CS Highlights", "url": "https://www.youtube.com/channel/UCcs2000000000000000001" }
+    ],
+    "time": "2026-07-03T21:00:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched Ad about productivity software",
+    "titleUrl": "https://www.youtube.com/watch?v=adadadadad1",
+    "subtitles": [
+      { "name": "Some Advertiser", "url": "https://www.youtube.com/channel/UCad0000000000000000001" }
+    ],
+    "details": [{ "name": "From Google Ads" }],
+    "time": "2026-07-03T21:05:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched https://www.youtube.com/watch?v=removed00001",
+    "time": "2026-07-04T10:00:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Watched AoE2 1v1 Arabia — Hera vs Viper",
+    "titleUrl": "https://www.youtube.com/shorts/jkl012MNO34",
+    "subtitles": [
+      { "name": "AoE Casts", "url": "https://www.youtube.com/channel/UCaoe000000000000000001" }
+    ],
+    "time": "2026-07-05T12:45:00.000Z",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube Music",
+    "title": "Watched Some Song (Official Video)",
+    "titleUrl": "https://music.youtube.com/watch?v=mno345PQR67",
+    "subtitles": [
+      { "name": "Some Band", "url": "https://www.youtube.com/channel/UCband00000000000000001" }
+    ],
+    "time": "2026-07-06T08:00:00.000Z",
+    "products": ["YouTube Music"],
+    "activityControls": ["YouTube watch history"]
+  },
+  {
+    "header": "YouTube",
+    "title": "Angesehen: Vortrag über eBPF im Kernel",
+    "titleUrl": "https://www.youtube.com/watch?v=pqr678STU90",
+    "subtitles": [
+      { "name": "media.ccc.de", "url": "https://www.youtube.com/channel/UCccc000000000000000001" }
+    ],
+    "time": "not-a-timestamp",
+    "products": ["YouTube"],
+    "activityControls": ["YouTube watch history"]
+  }
+]

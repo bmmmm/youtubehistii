@@ -1,0 +1,11 @@
+# Personal data + caches never leave this machine.
+data/
+
+# Local build artifact
+/youtubehistii
+
+# Local secrets/env
+.env
+
+# Real config may contain personal channel names — track only the example.
+/config/rules.yaml

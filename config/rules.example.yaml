@@ -1,0 +1,92 @@
+# youtubehistii classification rules — copy to config/rules.yaml and edit.
+#
+# Two axes per video:
+#   topic — free-form slug, convention "<area>/<sub>" (e.g. gaming/rust)
+#   mode  — consume | learn | mixed
+#
+# Stage 1 walks `rules` top to bottom; the FIRST matching rule wins, so put
+# specific rules (channels) before broad fallbacks (YouTube categories).
+# Stage 2 sends whatever stage 1 left unmatched to the local LLM (oMLX),
+# constrained to the topics listed here. Every verdict records its source
+# (rule id or model name) — nothing is classified invisibly.
+
+llm:
+  model: Qwen3.5-9B-MLX-4bit # any model your oMLX server has pulled
+  # base_url: http://127.0.0.1:8000/v1   # default; or env OMLX_URL
+
+# The taxonomy. `desc` is shown to the LLM, so make it discriminating.
+topics:
+  - id: gaming/rust
+    desc: Rust (the survival game) — gameplay, raids, base building
+  - id: gaming/cs2
+    desc: Counter-Strike 2 — matches, highlights, pro play
+  - id: gaming/aoe
+    desc: Age of Empires — casts, matches, strategy
+  - id: gaming/other
+    desc: any other gaming content, let's plays, esports
+  - id: dev/talks
+    desc: software engineering conference talks and technical deep dives
+  - id: dev/tutorials
+    desc: programming tutorials, courses, how-tos
+  - id: security
+    desc: IT security, CTF, exploits, defensive security
+  - id: science
+    desc: science, engineering, documentaries
+  - id: politics/news
+    desc: politics, news, commentary
+  - id: music
+    desc: music videos, live sets, concerts
+  - id: entertainment
+    desc: comedy, vlogs, memes, everything watched purely for fun
+  - id: unclear
+    desc: cannot tell from the available metadata
+
+# Matchers per rule (all optional, all case-insensitive; a rule fires when
+# ANY of its listed values matches its field):
+#   channel_any  — exact channel name
+#   title_any    — substring of the video title
+#   tag_any      — exact creator tag (only after `enrich`)
+#   text_any     — substring of title OR any tag
+#   category_any — official YouTube category (only after `enrich`)
+rules:
+  # --- channels: the strongest signal; a let's-play channel is always consume
+  - id: ccc-talks
+    channel_any: ["media.ccc.de"]
+    topic: dev/talks
+    mode: learn
+
+  # --- title/tag keywords
+  - id: rust-game
+    text_any: ["rust raid", "rust base", "rust pvp", "rust solo"]
+    topic: gaming/rust
+    mode: consume
+  - id: cs2
+    text_any: ["cs2", "counter-strike"]
+    topic: gaming/cs2
+    mode: consume
+  - id: aoe
+    text_any: ["aoe2", "aoe4", "age of empires"]
+    topic: gaming/aoe
+    mode: consume
+  - id: conference-talk
+    title_any: ["conf talk", "keynote", "gopherccon", "fosdem", "defcon", "38c3", "39c3"]
+    topic: dev/talks
+    mode: learn
+  - id: tutorial
+    title_any: ["tutorial", "how to", "crash course", "explained"]
+    topic: dev/tutorials
+    mode: learn
+
+  # --- broad fallbacks via official YouTube category (needs `enrich`)
+  - id: category-gaming
+    category_any: ["Gaming"]
+    topic: gaming/other
+    mode: consume
+  - id: category-music
+    category_any: ["Music"]
+    topic: music
+    mode: consume
+  - id: category-education
+    category_any: ["Education", "Science & Technology"]
+    topic: science
+    mode: learn
