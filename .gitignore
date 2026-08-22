@@ -12,3 +12,6 @@ data/
 
 # Real config may contain personal channel names — track only the example.
 /config/rules.yaml
+
+# Working notes stay local (never on the public mirror)
+/TODO.md
