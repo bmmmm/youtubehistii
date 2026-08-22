@@ -13,14 +13,18 @@ import (
 var (
 	historyNames = map[string]bool{"wiedergabeverlauf.json": true, "watch-history.json": true}
 	subsNames    = map[string]bool{"abos.csv": true, "subscriptions.csv": true}
+	// The HTML variants are Takeout's default export format — useless to us,
+	// but finding one lets the error message say precisely what went wrong.
+	htmlNames = map[string]bool{"wiedergabeverlauf.html": true, "watch-history.html": true}
 )
 
 const findMaxDepth = 4
 
 // FindExport walks root (a data dir, a Takeout root, or the "YouTube …"
-// folder itself) and returns the watch-history JSON and subscriptions CSV
-// paths. Either result may be "" when not present.
-func FindExport(root string) (historyPath, subsPath string) {
+// folder itself) and returns the watch-history JSON, subscriptions CSV and —
+// when only the HTML export exists — the history HTML path. Any result may
+// be "" when not present.
+func FindExport(root string) (historyPath, subsPath, htmlPath string) {
 	_ = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil // unreadable entries are skipped, not fatal
@@ -45,8 +49,10 @@ func FindExport(root string) (historyPath, subsPath string) {
 			historyPath = path
 		case subsNames[name] && subsPath == "":
 			subsPath = path
+		case htmlNames[name] && htmlPath == "":
+			htmlPath = path
 		}
 		return nil
 	})
-	return historyPath, subsPath
+	return historyPath, subsPath, htmlPath
 }

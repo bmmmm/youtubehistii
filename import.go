@@ -5,6 +5,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/takeout"
@@ -87,11 +88,46 @@ func resolveExport(p paths, arg string) (historyPath, subsPath string, err error
 	case statErr != nil:
 		return "", "", fmt.Errorf("no data directory at %s — place your Takeout export there (see README)", root)
 	}
-	h, s := takeout.FindExport(root)
+	h, s, html := takeout.FindExport(root)
 	if h == "" {
-		return "", "", fmt.Errorf("no watch-history JSON found under %s — expected watch-history.json or Wiedergabeverlauf.json (Takeout: choose JSON format for history)", root)
+		return "", "", fmt.Errorf("%s", noExportMessage(root, html))
 	}
 	return h, s, nil
+}
+
+// noExportMessage explains what is actually in the data directory and what
+// was expected, instead of a bare "not found".
+func noExportMessage(root, htmlPath string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "no watch-history JSON found under %s", root)
+	if htmlPath != "" {
+		fmt.Fprintf(&b, "\n  found %s — that is Takeout's HTML export, which cannot be parsed.", htmlPath)
+		b.WriteString("\n  re-export at takeout.google.com and switch the history format from HTML to JSON")
+		return b.String()
+	}
+	entries, err := os.ReadDir(root)
+	switch {
+	case err != nil || len(entries) == 0:
+		b.WriteString("\n  the directory is empty — copy your Takeout folder (e.g. \"YouTube und YouTube Music\") into it")
+	default:
+		b.WriteString("\n  it contains: ")
+		for i, e := range entries {
+			if i > 0 {
+				b.WriteString(", ")
+			}
+			if i == 8 {
+				fmt.Fprintf(&b, "… (%d more)", len(entries)-i)
+				break
+			}
+			b.WriteString(e.Name())
+			if e.IsDir() {
+				b.WriteString("/")
+			}
+		}
+		b.WriteString("\n  expected somewhere inside: Wiedergabeverlauf.json (DE) or watch-history.json (EN)")
+	}
+	b.WriteString("\n  (a different path can be passed directly: youtubehistii import <file-or-dir>)")
+	return b.String()
 }
 
 // importSubscriptions is optional: without the CSV the report simply skips

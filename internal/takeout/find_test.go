@@ -26,7 +26,7 @@ func TestFindExportGermanLayout(t *testing.T) {
 	touch(t, filepath.Join(root, "YouTube und YouTube Music", "Abos", "Abos.csv"))
 	touch(t, filepath.Join(root, "YouTube und YouTube Music", "Playlists", "Playlists.csv"))
 
-	h, s := FindExport(root)
+	h, s, _ := FindExport(root)
 	if filepath.Base(h) != "Wiedergabeverlauf.json" {
 		t.Errorf("history = %q", h)
 	}
@@ -39,24 +39,36 @@ func TestFindExportEnglishFlat(t *testing.T) {
 	root := t.TempDir()
 	touch(t, filepath.Join(root, "watch-history.json"))
 	touch(t, filepath.Join(root, "subscriptions.csv"))
-	h, s := FindExport(root)
+	h, s, _ := FindExport(root)
 	if filepath.Base(h) != "watch-history.json" || filepath.Base(s) != "subscriptions.csv" {
 		t.Errorf("h=%q s=%q", h, s)
+	}
+}
+
+func TestFindExportDetectsHTMLOnlyExport(t *testing.T) {
+	root := t.TempDir()
+	touch(t, filepath.Join(root, "YouTube und YouTube Music", "Verlauf", "Wiedergabeverlauf.html"))
+	h, _, html := FindExport(root)
+	if h != "" {
+		t.Errorf("history = %q, want none", h)
+	}
+	if filepath.Base(html) != "Wiedergabeverlauf.html" {
+		t.Errorf("html = %q", html)
 	}
 }
 
 func TestFindExportSkipsToolDirs(t *testing.T) {
 	root := t.TempDir()
 	touch(t, filepath.Join(root, "cache", "meta", "watch-history.json"))
-	h, s := FindExport(root)
+	h, s, _ := FindExport(root)
 	if h != "" || s != "" {
 		t.Errorf("found files inside cache/: h=%q s=%q", h, s)
 	}
 }
 
 func TestFindExportEmpty(t *testing.T) {
-	h, s := FindExport(t.TempDir())
-	if h != "" || s != "" {
-		t.Errorf("h=%q s=%q", h, s)
+	h, s, html := FindExport(t.TempDir())
+	if h != "" || s != "" || html != "" {
+		t.Errorf("h=%q s=%q html=%q", h, s, html)
 	}
 }

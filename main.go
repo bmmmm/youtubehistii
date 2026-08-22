@@ -31,6 +31,8 @@ Usage:
                                   (default path: data/watch-history.json;
                                   also picks up data/subscriptions.csv, or -subs <csv>)
   youtubehistii enrich            fetch video metadata via yt-dlp -> data/cache/meta/
+                                  (flags: -limit N, -workers 3, -sleep 1.0, -chunk 100;
+                                  most-watched videos are fetched first, safe to interrupt)
   youtubehistii classify          rules first, then local LLM (oMLX) -> data/classified.jsonl
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
   youtubehistii version           print version

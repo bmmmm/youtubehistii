@@ -4,6 +4,7 @@
 package takeout
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,8 +62,12 @@ var (
 
 // Parse reads a Takeout watch-history JSON array and returns normalized views.
 func Parse(r io.Reader) ([]View, Stats, error) {
+	br := bufio.NewReader(r)
+	if first, err := br.Peek(1); err == nil && first[0] == '<' {
+		return nil, Stats{}, fmt.Errorf("this looks like Takeout's HTML export — re-export with the history format switched from HTML to JSON")
+	}
 	var entries []rawEntry
-	dec := json.NewDecoder(r)
+	dec := json.NewDecoder(br)
 	if err := dec.Decode(&entries); err != nil {
 		return nil, Stats{}, fmt.Errorf("decode takeout JSON: %w", err)
 	}
