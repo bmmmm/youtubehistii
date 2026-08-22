@@ -22,6 +22,11 @@ youtubehistii report                              → data/out/report.html + rep
 
 Each stage writes plain, inspectable files and can be re-run independently.
 `enrich` is resumable — interrupt it any time, it skips what is already cached.
+It fetches most-watched videos first (so a `-limit` test batch covers the
+largest share of your actual views) and runs a small worker pool
+(`-workers 3 -sleep 1.0` by default — keep the aggregate rate modest, YouTube
+rate-limits by IP). Videos that are gone from YouTube are tombstoned: skipped
+on retries but kept and counted in the report.
 
 ## Getting your data
 
