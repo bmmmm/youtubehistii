@@ -55,6 +55,20 @@ ERROR: [youtube] flaky000003: Unable to download webpage: timed out`
 	}
 }
 
+func TestClassifyErrorsAgeRestrictedIsGoneNotBotCheck(t *testing.T) {
+	stderr := `ERROR: [youtube] age00000001: Sign in to confirm your age. This video may be inappropriate for some users
+ERROR: [youtube] bot00000002: Sign in to confirm you're not a bot`
+	gone, failed := ClassifyErrors(stderr, []string{"age00000001", "bot00000002"})
+	// Age verification is permanent without --cookies -> tombstone it.
+	if len(gone) != 1 || gone[0] != "age00000001" {
+		t.Errorf("gone = %v, want [age00000001]", gone)
+	}
+	// Bot-check signals IP-level rate limiting -> transient, retry later.
+	if len(failed) != 1 || failed[0] != "bot00000002" {
+		t.Errorf("failed = %v, want [bot00000002]", failed)
+	}
+}
+
 func TestCacheRoundtrip(t *testing.T) {
 	c := Cache{Dir: t.TempDir()}
 	if c.Has("abc123DEF45") {

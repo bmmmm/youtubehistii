@@ -137,7 +137,11 @@ type ChunkResult struct {
 var errLineRe = regexp.MustCompile(`ERROR: \[[^\]]+\] ([A-Za-z0-9_-]{6,20}): (.*)`)
 
 // goneMarkers in an error message mean the video will never come back.
-var goneMarkers = []string{"unavailable", "private", "removed", "terminated", "not available"}
+// "confirm your age" is deliberately narrow — it only matches the
+// age-verification wall (permanent without --cookies), never the separate
+// "confirm you're not a bot" message, which signals IP-level rate limiting
+// and is transient (retry later, don't tombstone).
+var goneMarkers = []string{"unavailable", "private", "removed", "terminated", "not available", "confirm your age"}
 
 // ClassifyErrors splits the IDs missing from stdout into gone vs. transient,
 // based on yt-dlp's stderr.
@@ -212,16 +216,22 @@ func FetchChunk(ids []string, sleepSeconds float64) (ChunkResult, error) {
 		res.Fetched = append(res.Fetched, m)
 		got[m.ID] = true
 	}
-	if len(res.Fetched) == 0 && runErr != nil {
-		return res, fmt.Errorf("yt-dlp: %w\n%s", runErr, lastLines(stderr.String(), 5))
-	}
-
 	var missing []string
 	for _, id := range ids {
 		if !got[id] {
 			missing = append(missing, id)
 		}
 	}
+	// Fatal only when yt-dlp explained NONE of the missing IDs — that means
+	// it never got to per-video processing at all (binary missing, auth
+	// wall, network down for the whole run). A chunk that just happens to be
+	// all-private/all-deleted still gets a per-ID reason for every ID and
+	// must not kill the rest of a long run — that's what ClassifyErrors below
+	// is for.
+	if len(res.Fetched) == 0 && runErr != nil && !errLineRe.MatchString(stderr.String()) {
+		return ChunkResult{}, fmt.Errorf("yt-dlp: %w\n%s", runErr, lastLines(stderr.String(), 5))
+	}
+
 	res.Unavailable, res.Failed = ClassifyErrors(stderr.String(), missing)
 	return res, nil
 }
