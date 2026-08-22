@@ -22,6 +22,7 @@ type Verdict struct {
 	VideoID     string    `json:"videoID"`
 	Title       string    `json:"title"`
 	Channel     string    `json:"channel,omitempty"`
+	ChannelID   string    `json:"channelID,omitempty"`
 	WatchedAt   time.Time `json:"watchedAt"`
 	Topic       string    `json:"topic"`
 	Mode        string    `json:"mode,omitempty"`

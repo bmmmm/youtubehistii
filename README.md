@@ -27,9 +27,18 @@ Each stage writes plain, inspectable files and can be re-run independently.
 
 [takeout.google.com](https://takeout.google.com) → select only *YouTube and
 YouTube Music* → under format options choose **JSON** for history (the default
-is HTML). Place the resulting `watch-history.json` at `data/watch-history.json`.
+is HTML), and include **subscriptions** in the content selection. Place the
+files at `data/watch-history.json` and `data/subscriptions.csv`.
 
 The `data/` directory is gitignored: your history never leaves this machine.
+
+## Subscriptions
+
+With the subscriptions CSV in place, the report links your subscriptions to
+your actual watching: each subscription gets the dominant topic of its watched
+videos, dead subscriptions (never watched in the export) are called out, and
+the share of views/hours spent on subscribed vs. unsubscribed channels is
+shown. Top-channel tables mark subscribed channels.
 
 ## Requirements
 

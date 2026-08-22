@@ -28,7 +28,8 @@ func usage() {
 
 Usage:
   youtubehistii import [path]     parse Takeout JSON -> data/history.jsonl
-                                  (default path: data/watch-history.json)
+                                  (default path: data/watch-history.json;
+                                  also picks up data/subscriptions.csv, or -subs <csv>)
   youtubehistii enrich            fetch video metadata via yt-dlp -> data/cache/meta/
   youtubehistii classify          rules first, then local LLM (oMLX) -> data/classified.jsonl
   youtubehistii report            render data/out/report.html + report.csv + terminal summary

@@ -144,6 +144,7 @@ func cmdClassify(args []string) error {
 			VideoID:   v.VideoID,
 			Title:     v.Title,
 			Channel:   v.Channel,
+			ChannelID: takeout.ChannelIDFromURL(v.ChannelURL),
 			WatchedAt: v.WatchedAt,
 			Topic:     "unclear",
 			Source:    "unclassified",
@@ -156,6 +157,9 @@ func cmdClassify(args []string) error {
 			}
 			if m.Channel != "" {
 				row.Channel = m.Channel
+			}
+			if m.ChannelID != "" {
+				row.ChannelID = m.ChannelID
 			}
 		}
 		if v.VideoID == "" {

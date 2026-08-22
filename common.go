@@ -17,9 +17,11 @@ type paths struct {
 	dataDir string
 }
 
-func (p paths) historyJSONL() string  { return filepath.Join(p.dataDir, "history.jsonl") }
-func (p paths) metaCacheDir() string  { return filepath.Join(p.dataDir, "cache", "meta") }
-func (p paths) classifyCache() string { return filepath.Join(p.dataDir, "cache", "classify") }
+func (p paths) historyJSONL() string       { return filepath.Join(p.dataDir, "history.jsonl") }
+func (p paths) subscriptionsCSV() string   { return filepath.Join(p.dataDir, "subscriptions.csv") }
+func (p paths) subscriptionsJSONL() string { return filepath.Join(p.dataDir, "subscriptions.jsonl") }
+func (p paths) metaCacheDir() string       { return filepath.Join(p.dataDir, "cache", "meta") }
+func (p paths) classifyCache() string      { return filepath.Join(p.dataDir, "cache", "classify") }
 func (p paths) classifiedJSONL() string {
 	return filepath.Join(p.dataDir, "classified.jsonl")
 }

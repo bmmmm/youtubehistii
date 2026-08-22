@@ -13,6 +13,7 @@ import (
 
 func cmdImport(args []string) error {
 	fs, dataDir := newFlagSet("import")
+	subsPath := fs.String("subs", "", "subscriptions CSV from Takeout (default: data/subscriptions.csv if present)")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -63,5 +64,32 @@ func cmdImport(args []string) error {
 	if !oldest.IsZero() {
 		fmt.Printf("  range:          %s .. %s\n", oldest.Format("2006-01-02"), newest.Format("2006-01-02"))
 	}
+	return importSubscriptions(p, *subsPath)
+}
+
+// importSubscriptions is optional: without the CSV the report simply skips
+// the subscription sections.
+func importSubscriptions(p paths, path string) error {
+	explicit := path != ""
+	if !explicit {
+		path = p.subscriptionsCSV()
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		if !explicit && os.IsNotExist(err) {
+			fmt.Printf("no subscriptions CSV at %s — skipping (export \"subscriptions\" in Takeout to include it)\n", path)
+			return nil
+		}
+		return fmt.Errorf("open subscriptions: %w", err)
+	}
+	defer f.Close()
+	subs, err := takeout.ParseSubscriptions(f)
+	if err != nil {
+		return err
+	}
+	if err := writeJSONL(p.subscriptionsJSONL(), subs); err != nil {
+		return err
+	}
+	fmt.Printf("imported %s -> %s (%d subscriptions)\n", path, p.subscriptionsJSONL(), len(subs))
 	return nil
 }
