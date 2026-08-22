@@ -7,8 +7,10 @@ import (
 	"strings"
 )
 
-// RenderText is the compact terminal summary of the same numbers.
-func RenderText(st *Stats) string {
+// RenderText is the compact terminal summary of the same numbers. With
+// showNames=false every channel/subscription name is omitted — aggregates
+// and topic slugs only, safe to share or paste.
+func RenderText(st *Stats, showNames bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d views, %d unique videos, ≤ %.0f h (upper bound), %s … %s\n",
 		st.Views, st.UniqueVideos, st.HoursUpper, fmtDate(st.From), fmtDate(st.To))
@@ -48,14 +50,14 @@ func RenderText(st *Stats) string {
 			len(st.Subs), st.DeadSubs,
 			pctI(st.SubbedViews, st.Views), pctF(st.SubbedHours, st.HoursUpper))
 		for i, s := range st.Subs {
-			if i >= 5 || s.Views == 0 {
+			if !showNames || i >= 5 || s.Views == 0 {
 				break
 			}
 			fmt.Fprintf(&b, "  %-30s %-16s %4d views  ≤%6.1f h\n", clip(s.Title, 30), s.TopTopic, s.Views, s.Hours)
 		}
 	}
 
-	if len(st.UnclearNames) > 0 {
+	if len(st.UnclearNames) > 0 && showNames {
 		fmt.Fprintf(&b, "\nunclear — top channels to add rules for: %s\n",
 			strings.Join(st.UnclearNames[:min(5, len(st.UnclearNames))], ", "))
 	}

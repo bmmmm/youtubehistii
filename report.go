@@ -16,6 +16,7 @@ import (
 
 func cmdReport(args []string) error {
 	fs, dataDir := newFlagSet("report")
+	noNames := fs.Bool("no-names", false, "terminal summary without channel/subscription names (aggregates and topics only, safe to paste)")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -54,7 +55,7 @@ func cmdReport(args []string) error {
 		return err
 	}
 
-	fmt.Print(report.RenderText(st))
+	fmt.Print(report.RenderText(st, !*noNames))
 	fmt.Printf("\nwrote %s and %s\n", htmlPath, csvPath)
 	return nil
 }

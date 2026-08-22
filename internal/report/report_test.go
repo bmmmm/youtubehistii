@@ -102,10 +102,24 @@ func TestWriteCSV(t *testing.T) {
 
 func TestRenderText(t *testing.T) {
 	rows, subs := sampleData()
-	txt := RenderText(Aggregate(rows, subs))
+	txt := RenderText(Aggregate(rows, subs), true)
 	for _, want := range []string{"gaming/rust", "subscriptions: 2 total, 1 never watched", "Mystery"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("text misses %q in:\n%s", want, txt)
+		}
+	}
+}
+
+func TestRenderTextNoNamesOmitsEveryName(t *testing.T) {
+	rows, subs := sampleData()
+	txt := RenderText(Aggregate(rows, subs), false)
+	// Aggregates stay, but no channel or subscription name may appear.
+	if !strings.Contains(txt, "subscriptions: 2 total") {
+		t.Errorf("aggregate line missing:\n%s", txt)
+	}
+	for _, name := range []string{"Mystery", "media.ccc.de", "RustGuy", "Never Watched"} {
+		if strings.Contains(txt, name) {
+			t.Errorf("no-names output leaks %q:\n%s", name, txt)
 		}
 	}
 }
