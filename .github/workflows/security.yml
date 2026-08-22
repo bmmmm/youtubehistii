@@ -1,0 +1,53 @@
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security:
+    name: Security checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # full history — catch secrets in old commits too
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check for forbidden files
+        run: |
+          forbidden=$(git ls-files | grep -iE \
+            '\.(env|pem|key|p12|pfx|pkcs12|crt|cer|der)$|^\.env(\..+)?$|secret|credential|password|id_rsa|id_ed25519|id_ecdsa' \
+            || true)
+          if [[ -n "$forbidden" ]]; then
+            echo "::error::Forbidden files tracked in repo:"
+            echo "$forbidden" | while read -r f; do echo "  $f"; done
+            exit 1
+          fi
+          echo "No forbidden files found."
+
+      - name: Check for hardcoded tokens
+        run: |
+          # Patterns: GitHub PAT, gh classic token, Anthropic key, generic Bearer/API key assignments
+          matches=$(grep -rn \
+            -e 'ghp_[a-zA-Z0-9]\{36\}' \
+            -e 'github_pat_[a-zA-Z0-9_]\{82\}' \
+            -e 'ghs_[a-zA-Z0-9]\{36\}' \
+            -e 'ANTHROPIC_API_KEY\s*=\s*["'"'"'][^"'"'"']' \
+            -e 'sk-ant-[a-zA-Z0-9\-_]\{90\}' \
+            --include="*.sh" --include="*.zsh" --include="*.json" \
+            --include="*.yml" --include="*.yaml" --include="*.md" \
+            --include="*.go" --include="*.conf" \
+            . 2>/dev/null | grep -v "^Binary" || true)
+          if [[ -n "$matches" ]]; then
+            echo "::error::Potential hardcoded tokens found:"
+            echo "$matches"
+            exit 1
+          fi
+          echo "No hardcoded tokens found."

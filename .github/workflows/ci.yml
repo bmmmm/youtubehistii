@@ -1,0 +1,34 @@
+# CI template — Go. Copy to .github/workflows/ci.yml and adjust:
+#   - if the module lives in a subdir, add
+#     `defaults: { run: { working-directory: <dir> } }` under the job.
+#   - add `go build ./...` variants or a matrix only when the project needs
+#     them — this baseline covers fmt, vet, tests, and a build.
+# `go-version: 'stable'` tracks the latest release; pin (e.g. '1.26') only
+# when the repo must stay on an older toolchain. Public repos get free
+# GitHub-hosted runners — keep `-latest`. Action majors verified 2026-08
+# (checkout v7, setup-go v7); when adding actions, query
+# `gh api repos/<owner>/<action>/releases/latest` instead of pinning from
+# memory. Based on the green wallii CI (2026-08).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: 'stable'
+      - name: gofmt
+        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go build .
