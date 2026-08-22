@@ -34,6 +34,14 @@ Usage:
                                   (flags: -limit N, -workers 3, -sleep 1.0, -chunk 100;
                                   most-watched videos are fetched first, safe to interrupt)
   youtubehistii classify          rules first, then local LLM (oMLX) -> data/classified.jsonl
+                                  (flags: -llm-batch 10, -llm-workers 1, -llm-limit N,
+                                  -no-llm, -include-unenriched; only enriched or
+                                  tombstoned videos are sent to the LLM)
+  youtubehistii run               enrich and classify together: metadata fetching runs
+                                  continuously, classification catches up in waves
+                                  (every 60s or 200 new videos), final report at the
+                                  end — takes both commands' flags, Ctrl-C safe,
+                                  rerun to resume
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
   youtubehistii version           print version
 
@@ -57,6 +65,8 @@ func main() {
 		err = cmdEnrich(args)
 	case "classify":
 		err = cmdClassify(args)
+	case "run":
+		err = cmdRun(args)
 	case "report":
 		err = cmdReport(args)
 	case "version", "--version", "-v":

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"sort"
@@ -13,28 +14,60 @@ import (
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
 
+// enrichFlags are the metadata-fetch flags shared by "enrich" and "run".
+type enrichFlags struct {
+	limit, chunk, workers *int
+	sleep                 *float64
+}
+
+func addEnrichFlags(fs *flag.FlagSet) enrichFlags {
+	return enrichFlags{
+		limit:   fs.Int("limit", 0, "fetch at most N videos this run (0 = all missing)"),
+		chunk:   fs.Int("chunk", 100, "videos per yt-dlp invocation"),
+		workers: fs.Int("workers", 3, "parallel yt-dlp processes (keep low — YouTube rate limits by IP)"),
+		sleep:   fs.Float64("sleep", 1.0, "seconds yt-dlp sleeps between requests, per worker (effective rate ≈ workers/sleep)"),
+	}
+}
+
+func (ef enrichFlags) opts() enrichOpts {
+	return enrichOpts{limit: *ef.limit, chunk: *ef.chunk, workers: *ef.workers, sleep: *ef.sleep}
+}
+
+type enrichOpts struct {
+	limit, chunk, workers int
+	sleep                 float64
+	stop                  <-chan struct{} // optional: stop feeding new chunks (in-flight ones finish)
+}
+
 func cmdEnrich(args []string) error {
 	fs, dataDir := newFlagSet("enrich")
-	limit := fs.Int("limit", 0, "fetch at most N videos this run (0 = all missing)")
-	chunk := fs.Int("chunk", 100, "videos per yt-dlp invocation")
-	workers := fs.Int("workers", 3, "parallel yt-dlp processes (keep low — YouTube rate limits by IP)")
-	sleep := fs.Float64("sleep", 1.0, "seconds yt-dlp sleeps between requests, per worker (effective rate ≈ workers/sleep)")
+	ef := addEnrichFlags(fs)
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
-	if *workers < 1 {
-		*workers = 1
-	}
 
 	views, err := readJSONL[takeout.View](p.historyJSONL())
 	if err != nil {
 		return fmt.Errorf("read history (run \"import\" first): %w", err)
 	}
+	return enrichAll(p, views, ef.opts())
+}
 
+// enrichAll fetches metadata for every missing video. It coexists with
+// another enrich running in parallel (the per-ID cache writes are
+// independent): each chunk re-checks the cache right before fetching, so the
+// worst case is one double fetch per chunk boundary.
+func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
+	if opts.workers < 1 {
+		opts.workers = 1
+	}
+	if opts.chunk < 1 {
+		opts.chunk = 100
+	}
 	cache := enrich.Cache{Dir: p.metaCacheDir()}
 	missing, uniqueTotal := missingByPriority(views, cache)
 	fmt.Printf("%d unique videos, %d cached, %d to fetch\n", uniqueTotal, uniqueTotal-len(missing), len(missing))
-	if *limit > 0 && len(missing) > *limit {
-		missing = missing[:*limit]
+	if opts.limit > 0 && len(missing) > opts.limit {
+		missing = missing[:opts.limit]
 		fmt.Printf("limiting this run to the %d most-watched missing videos\n", len(missing))
 	}
 	if len(missing) == 0 {
@@ -55,12 +88,24 @@ func cmdEnrich(args []string) error {
 	start := time.Now()
 	jobs := make(chan []string)
 	var wg sync.WaitGroup
-	for w := 0; w < *workers; w++ {
+	for w := 0; w < opts.workers; w++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for ids := range jobs {
-				res, err := enrich.FetchChunk(ids, *sleep)
+			for all := range jobs {
+				// Another enrich may have cached some of these since the
+				// missing list was built — skip them, fetch only the rest.
+				ids := make([]string, 0, len(all))
+				for _, id := range all {
+					if !cache.Has(id) {
+						ids = append(ids, id)
+					}
+				}
+				var res enrich.ChunkResult
+				var err error
+				if len(ids) > 0 {
+					res, err = enrich.FetchChunk(ids, opts.sleep)
+				}
 				mu.Lock()
 				if err != nil {
 					if t.err == nil {
@@ -82,7 +127,7 @@ func cmdEnrich(args []string) error {
 				t.fetched += len(res.Fetched)
 				t.tombstoned += len(res.Unavailable)
 				t.failed += len(res.Failed)
-				t.done += len(ids)
+				t.done += len(all)
 				elapsed := time.Since(start)
 				eta := time.Duration(float64(elapsed) / float64(t.done) * float64(len(missing)-t.done)).Round(time.Second)
 				fmt.Printf("  %d/%d (fetched %d, gone %d, failed %d) ETA %s\n",
@@ -91,14 +136,24 @@ func cmdEnrich(args []string) error {
 			}
 		}()
 	}
-	for off := 0; off < len(missing); off += *chunk {
+feed:
+	for off := 0; off < len(missing); off += opts.chunk {
 		mu.Lock()
-		stop := t.err != nil
+		abort := t.err != nil
 		mu.Unlock()
-		if stop {
+		if abort {
 			break
 		}
-		jobs <- missing[off:min(off+*chunk, len(missing))]
+		ids := missing[off:min(off+opts.chunk, len(missing))]
+		if opts.stop != nil {
+			select {
+			case <-opts.stop:
+				break feed
+			case jobs <- ids:
+			}
+		} else {
+			jobs <- ids
+		}
 	}
 	close(jobs)
 	wg.Wait()

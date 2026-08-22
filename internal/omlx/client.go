@@ -100,13 +100,19 @@ type chatResponse struct {
 
 // Chat sends one system+user exchange and returns the assistant text.
 func (c *Client) Chat(system, user string) (string, error) {
+	return c.ChatMax(system, user, 512)
+}
+
+// ChatMax is Chat with an explicit max_tokens — batch prompts scale it with
+// the batch size so long replies are never cut off mid-verdict.
+func (c *Client) ChatMax(system, user string, maxTokens int) (string, error) {
 	body, err := json.Marshal(chatRequest{
 		Model:       c.Model,
 		Messages:    []chatMessage{{Role: "system", Content: system}, {Role: "user", Content: user}},
 		Temperature: 0,
 		Stream:      false,
-		MaxTokens:   512,
-		// Qwen3-style thinking off — we only want the JSON verdict.
+		MaxTokens:   maxTokens,
+		// Qwen3-style thinking off — we only want the verdict.
 		ChatTemplateKwargs: map[string]any{"enable_thinking": false},
 	})
 	if err != nil {

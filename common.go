@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // paths centralizes every file the pipeline reads or writes, so each stage
@@ -61,6 +62,40 @@ func writeJSONL[T any](path string, items []T) error {
 		return err
 	}
 	return os.Rename(tmp.Name(), path)
+}
+
+// loadNewCacheEntries reads every <id>.json in dir that is not yet in seen
+// and returns id -> decoded value. Files that fail to read or decode are
+// skipped WITHOUT being marked seen: a concurrent writer (enrich in another
+// terminal, or the run pipeline itself) may be mid-write, and the next scan
+// picks them up. This is what makes wave scans incremental — the caller keeps
+// seen across calls and only ever pays for NEW files.
+func loadNewCacheEntries[T any](dir string, seen map[string]bool) (map[string]T, error) {
+	out := map[string]T{}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") || seen[name] {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			continue
+		}
+		var v T
+		if err := json.Unmarshal(b, &v); err != nil {
+			continue
+		}
+		out[strings.TrimSuffix(name, ".json")] = v
+		seen[name] = true
+	}
+	return out, nil
 }
 
 // readJSONL reads one JSON document per line.
