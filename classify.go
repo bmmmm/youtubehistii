@@ -201,7 +201,9 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			fmt.Fprintf(os.Stderr, "warning: %v\nwarning: skipping the LLM this pass — %d videos wait for the next one\n", err, len(live))
 			llmDown = true
 		case !slices.Contains(models, client.Model):
-			return st, fmt.Errorf("model %q not on the oMLX server — available: %s", client.Model, strings.Join(models, ", "))
+			fmt.Fprintf(os.Stderr, "warning: model %q not on the oMLX server (available: %s)\nwarning: skipping the LLM this pass — %d videos wait for the next one\n",
+				client.Model, strings.Join(models, ", "), len(live))
+			llmDown = true
 		}
 		if !llmDown && opts.progress {
 			fmt.Printf("asking %s (model %s)\n", client.BaseURL, client.Model)
