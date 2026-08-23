@@ -26,9 +26,24 @@ Each stage writes plain, inspectable files and can be re-run independently.
 `enrich` is resumable — interrupt it any time, it skips what is already cached.
 It fetches most-watched videos first (so a `-limit` test batch covers the
 largest share of your actual views) and runs a small worker pool
-(`-workers 3 -sleep 1.0` by default — keep the aggregate rate modest, YouTube
-rate-limits by IP). Videos that are gone from YouTube are tombstoned: skipped
-on retries but kept and counted in the report.
+(`-workers 3 -sleep 0.25` by default). YouTube rate-limits by IP: when it
+starts pushing back, enrich doubles its request sleep and pauses instead of
+burning the rest of the run marking everything failed, then eases back off
+once chunks come through cleanly. The progress line says so when it happens,
+so a throttled run does not look like a hung one.
+
+Videos that are gone for good are tombstoned — skipped on retries but kept and
+counted in the report. That includes the ones no anonymous request will ever
+reach: deleted, private, age-restricted and members-only.
+
+Enrich fetches anonymously. `-cookies-from-browser auto` (or a browser name,
+with the full `BROWSER[+KEYRING][:PROFILE]` syntax) hands your browser cookies
+to yt-dlp, which can recover age-restricted videos — but only if that browser
+is actually signed in to YouTube, and at the price of making every request
+attributable to that Google account instead of just your IP. On a browser that
+is merely installed it buys nothing: cookies extract fine and the age wall
+stays up. Hence off by default. If a cookie source cannot be opened, enrich
+warns once and carries on without it rather than failing the run.
 
 ### run: the wave pipeline
 
