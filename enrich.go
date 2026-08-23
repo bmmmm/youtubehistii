@@ -32,8 +32,16 @@ func addEnrichFlags(fs *flag.FlagSet) enrichFlags {
 		// wall clock with byte-identical metadata and no bot check, and the
 		// rate-limit backoff below is what makes it safe to start there.
 		sleep: fs.Float64("sleep", 0.25, "seconds yt-dlp sleeps between requests, per worker (raised automatically when YouTube pushes back)"),
-		cookies: fs.String("cookies-from-browser", "auto",
-			`browser to take YouTube cookies from ("auto" picks the first installed, "" fetches anonymously)`),
+		// Off by default. Measured on this machine: yt-dlp extracted 220
+		// cookies from Chrome without trouble, and recovered exactly zero
+		// extra videos — the profile carries no YouTube login, so the
+		// age-restricted wall stayed up either way. Cookies only pay off for
+		// a browser that is actually signed in, and the price is that every
+		// request becomes attributable to that account instead of just an IP.
+		// So it is opt-in: "auto" picks the first installed browser, or name
+		// one directly (the full BROWSER[+KEYRING][:PROFILE] syntax works).
+		cookies: fs.String("cookies-from-browser", "",
+			`take YouTube cookies from a browser ("auto" picks the first installed); off by default`),
 	}
 }
 

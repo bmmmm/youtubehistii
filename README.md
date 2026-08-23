@@ -36,13 +36,14 @@ Videos that are gone for good are tombstoned — skipped on retries but kept and
 counted in the report. That includes the ones no anonymous request will ever
 reach: deleted, private, age-restricted and members-only.
 
-By default enrich passes your browser cookies to yt-dlp
-(`-cookies-from-browser auto` picks the first installed browser). That
-recovers age-restricted videos and lowers the bot-check rate — but it also
-makes every request authenticated, so a scrape over tens of thousands of
-videos is attached to your Google account rather than just your IP. Pass
-`-cookies-from-browser ""` to fetch anonymously. If the cookie source cannot
-be opened, enrich warns once and continues without it.
+Enrich fetches anonymously. `-cookies-from-browser auto` (or a browser name,
+with the full `BROWSER[+KEYRING][:PROFILE]` syntax) hands your browser cookies
+to yt-dlp, which can recover age-restricted videos — but only if that browser
+is actually signed in to YouTube, and at the price of making every request
+attributable to that Google account instead of just your IP. On a browser that
+is merely installed it buys nothing: cookies extract fine and the age wall
+stays up. Hence off by default. If a cookie source cannot be opened, enrich
+warns once and carries on without it rather than failing the run.
 
 ### run: the wave pipeline
 
