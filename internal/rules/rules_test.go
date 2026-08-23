@@ -32,16 +32,25 @@ func TestMatchOrder(t *testing.T) {
 
 	// Channel rule beats the later category fallback.
 	topic, mode, ruleID, ok := cfg.Match(Input{
-		Title: "Some talk", Channel: "media.ccc.de", Categories: []string{"Gaming"},
+		Title: "Some talk", Channel: "Example Conference Channel", Categories: []string{"Gaming"},
 	})
-	if !ok || topic != "dev/talks" || mode != "learn" || ruleID != "ccc-talks" {
+	if !ok || topic != "tech/talks" || mode != "learn" || ruleID != "conference-channel" {
 		t.Errorf("got %s/%s via %s ok=%v", topic, mode, ruleID, ok)
 	}
 
 	// text_any matches inside a tag.
-	topic, _, _, ok = cfg.Match(Input{Title: "Monday stream", Tags: []string{"rust base tour"}})
-	if !ok || topic != "gaming/rust" {
+	topic, _, _, ok = cfg.Match(Input{Title: "Monday stream", Tags: []string{"speedrun attempt"}})
+	if !ok || topic != "gaming" {
 		t.Errorf("tag text match: got %s ok=%v", topic, ok)
+	}
+
+	// tag_any needs the EXACT tag — a substring must not fire it.
+	topic, _, ruleID, ok = cfg.Match(Input{Title: "Acoustic evening", Tags: []string{"live session"}})
+	if !ok || topic != "music" || ruleID != "live-music" {
+		t.Errorf("exact tag match: got %s via %s ok=%v", topic, ruleID, ok)
+	}
+	if _, _, _, ok := cfg.Match(Input{Title: "Acoustic evening", Tags: []string{"live session recap"}}); ok {
+		t.Error("tag_any must not match a substring")
 	}
 
 	// Category fallback fires when nothing specific matched.
@@ -58,8 +67,8 @@ func TestMatchOrder(t *testing.T) {
 
 func TestMatchIsCaseInsensitive(t *testing.T) {
 	cfg := loadExample(t)
-	topic, _, _, ok := cfg.Match(Input{Title: "AGE OF EMPIRES iv grand final"})
-	if !ok || topic != "gaming/aoe" {
+	topic, _, _, ok := cfg.Match(Input{Title: "FULL WALKTHROUGH — final boss"})
+	if !ok || topic != "gaming" {
 		t.Errorf("got %s ok=%v", topic, ok)
 	}
 }
