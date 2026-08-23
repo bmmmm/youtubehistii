@@ -17,14 +17,11 @@ import (
 //	ok*    -> full record
 //	gone*  -> permanently unavailable
 //	bot*   -> rate limiting (typographic apostrophe, exactly as yt-dlp emits)
-//	slow*  -> fails on the pinned fast client, succeeds on yt-dlp's defaults
 //	other  -> transient failure
 const fakeYtDLP = `#!/bin/sh
 printf '%s\n' "$*" >> "$ARGLOG"
 case "$*" in *--cookies-from-browser*) [ -n "$COOKIE_FAIL" ] && {
   echo "ERROR: could not find chrome cookies database" >&2; exit 1; } ;; esac
-fast=no
-case "$*" in *player_client*) fast=yes ;; esac
 batch=""; prev=""
 for a in "$@"; do
   [ "$prev" = "-a" ] && batch="$a"
@@ -35,7 +32,6 @@ while read -r url; do
   id=${url##*v=}
   case "$id" in
     ok*)   ;;
-    slow*) [ "$fast" = yes ] && { echo "ERROR: [youtube] $id: Unable to download webpage: timed out" >&2; rc=1; continue; } ;;
     gone*) echo "ERROR: [youtube] $id: Video unavailable. This video has been removed" >&2; rc=1; continue ;;
     bot*)  echo "ERROR: [youtube] $id: Sign in to confirm you’re not a bot" >&2; rc=1; continue ;;
     *)     echo "ERROR: [youtube] $id: Unable to download webpage: timed out" >&2; rc=1; continue ;;
@@ -98,20 +94,21 @@ func TestFetchChunkSplitsOutcomes(t *testing.T) {
 	}
 }
 
-func TestFetchChunkPassesClientAndCookies(t *testing.T) {
+func TestFetchChunkPassesSleepAndCookies(t *testing.T) {
 	args := useFakeYtDLP(t)
-	if _, err := FetchChunk([]string{"ok0000001"}, FetchOpts{Sleep: 2.5, Client: FastClient, Cookies: "brave"}); err != nil {
+	if _, err := FetchChunk([]string{"ok0000001"}, FetchOpts{Sleep: 2.5, Cookies: "brave"}); err != nil {
 		t.Fatal(err)
 	}
 	got := args()
-	for _, want := range []string{
-		"youtube:player_client=" + FastClient,
-		"--cookies-from-browser brave",
-		"--sleep-requests 2.5",
-	} {
+	for _, want := range []string{"--cookies-from-browser brave", "--sleep-requests 2.5"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("args %q missing %q", got, want)
 		}
+	}
+	// yt-dlp picks its own player clients; pinning one was measured to buy
+	// no wall clock and cost a whole fallback pass, so nothing overrides it.
+	if strings.Contains(got, "player_client") {
+		t.Errorf("args %q pin a player client", got)
 	}
 }
 

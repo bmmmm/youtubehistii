@@ -183,53 +183,22 @@ func (s *runState) dropCookies() (first bool) {
 	return first
 }
 
-// fetchOne runs the single-client pass and, only for what it could not
-// resolve, a second pass on yt-dlp's default clients. The fallback keeps the
-// coverage of the two-client default for the videos that need it, and doubles
-// as an in-run retry for transient failures that would otherwise cost the
-// user a whole rerun.
-//
-// Its cost is bounded by the transient-failure rate, which is why correct
-// classification matters so much: while members-only videos were misfiled as
-// transient, this pass retried a permanent paywall on every chunk and made
-// the run measurably SLOWER than no fallback at all.
+// fetchOne fetches one chunk at the run's current pace. Transient failures
+// are left for the next run, which is what makes the cache resumable — the
+// only in-run retry is for a cookie source yt-dlp could not open, because
+// that is a configuration problem the run can fix for itself.
 func fetchOne(fetch fetchFunc, ids []string, sleep float64, st *runState) (enrich.ChunkResult, error) {
 	backoff, cookies := st.snapshot()
 	sleep *= float64(int(1) << backoff)
 
-	res, err := fetch(ids, enrich.FetchOpts{Sleep: sleep, Client: enrich.FastClient, Cookies: cookies})
-	if err != nil {
+	res, err := fetch(ids, enrich.FetchOpts{Sleep: sleep, Cookies: cookies})
+	if err != nil || !res.CookiesFailed {
 		return res, err
 	}
-	if res.CookiesFailed {
-		if st.dropCookies() {
-			fmt.Fprintln(os.Stderr, "warning: browser cookies unusable — continuing without them (age-restricted videos will be tombstoned)")
-		}
-		cookies = ""
-		res, err = fetch(ids, enrich.FetchOpts{Sleep: sleep, Client: enrich.FastClient})
-		if err != nil {
-			return res, err
-		}
+	if st.dropCookies() {
+		fmt.Fprintln(os.Stderr, "warning: browser cookies unusable — continuing without them (age-restricted videos will be tombstoned)")
 	}
-	// Retrying into an active bot check only digs the hole deeper — let the
-	// caller back off and leave these for the next run.
-	if len(res.Failed) == 0 || res.RateLimited {
-		return res, nil
-	}
-
-	retry, err := fetch(res.Failed, enrich.FetchOpts{Sleep: sleep, Cookies: cookies})
-	if err != nil {
-		// The fast pass's results are already good; a broken fallback just
-		// means these IDs wait for the next run.
-		return res, nil
-	}
-	merged := enrich.ChunkResult{
-		Fetched:     append(res.Fetched, retry.Fetched...),
-		Unavailable: append(res.Unavailable, retry.Unavailable...),
-		Failed:      retry.Failed,
-		RateLimited: retry.RateLimited,
-	}
-	return merged, nil
+	return fetch(ids, enrich.FetchOpts{Sleep: sleep})
 }
 
 // enrichAll fetches metadata for every missing video. It coexists with

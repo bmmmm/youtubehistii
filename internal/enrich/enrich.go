@@ -276,28 +276,20 @@ func ClassifyErrors(stderr string, missing []string) (gone, failed []string) {
 var ytDLPBin = "yt-dlp"
 
 // FetchOpts tunes one yt-dlp invocation.
+//
+// There is deliberately no player_client knob. Pinning a single client was
+// tried and measured: on a realistic 20-video chunk it made no difference to
+// wall clock (65.0 s versus 65.8 s), because the run is bound by
+// --sleep-requests and network latency, not by client count. It halved yt-dlp
+// CPU, but buying that meant a second fallback pass to cover the videos a
+// single client misses — complexity out of proportion to a saving nobody
+// waits on. yt-dlp's own client selection stays.
 type FetchOpts struct {
 	// Sleep is passed to --sleep-requests: seconds between HTTP requests.
 	Sleep float64
-	// Client pins youtube:player_client. Empty means yt-dlp's own default,
-	// which queries TWO clients (android_vr + web_safari).
-	//
-	// Measured on a 20-video chunk, the pin does NOT buy wall clock: 65.0 s
-	// versus 65.8 s, because the run is bound by --sleep-requests and network
-	// latency, not by client count. What it does buy is CPU — 3.65 s versus
-	// 6.02 s, roughly half — which is headroom for running more workers. A
-	// three-video probe suggested a much larger win; that was process startup
-	// and the one-off player-JS fetch, not a per-video saving. Kept for the
-	// CPU, not sold as throughput.
-	Client string
 	// Cookies is passed to --cookies-from-browser. Empty means no cookies.
 	Cookies string
 }
-
-// FastClient is the single player client the first pass pins. Chosen because
-// it needs no PO token and still carries microformat (category) and
-// videoDetails.keywords (tags).
-const FastClient = "android_vr"
 
 // FetchChunk asks yt-dlp for metadata of the given IDs in one invocation.
 func FetchChunk(ids []string, opts FetchOpts) (ChunkResult, error) {
@@ -319,9 +311,6 @@ func FetchChunk(ids []string, opts FetchOpts) (ChunkResult, error) {
 	args := []string{
 		"-j", "--ignore-errors", "--no-warnings", "--no-progress",
 		"--sleep-requests", fmt.Sprintf("%g", opts.Sleep),
-	}
-	if opts.Client != "" {
-		args = append(args, "--extractor-args", "youtube:player_client="+opts.Client)
 	}
 	if opts.Cookies != "" {
 		args = append(args, "--cookies-from-browser", opts.Cookies)

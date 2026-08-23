@@ -114,63 +114,28 @@ func (r *recorder) n() int {
 
 func newState() *runState { return &runState{pauseUnit: time.Millisecond} }
 
-// TestFetchOneFallsBackToDefaultClients is the safety net under the speed
-// win: pinning one player client is only allowed because whatever it cannot
-// resolve gets a second look on yt-dlp's own defaults.
-func TestFetchOneFallsBackToDefaultClients(t *testing.T) {
+// TestFetchOneDoesNotRetryTransientFailures: transient failures belong to the
+// next run, not to an immediate second request — the cache is resumable
+// precisely so a chunk costs one fetch.
+func TestFetchOneDoesNotRetryTransientFailures(t *testing.T) {
 	var rec recorder
 	fetch := func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
 		rec.record(ids, o)
-		if o.Client != "" { // fast pass
-			return enrich.ChunkResult{
-				Fetched:     []enrich.Meta{{ID: "ok0000001"}},
-				Unavailable: []string{"gone000002"},
-				Failed:      []string{"slow000003"},
-			}, nil
-		}
-		return enrich.ChunkResult{Fetched: []enrich.Meta{{ID: "slow000003"}}}, nil
+		return enrich.ChunkResult{
+			Fetched:     []enrich.Meta{{ID: "ok0000001"}},
+			Unavailable: []string{"gone000002"},
+			Failed:      []string{"flaky00003"},
+		}, nil
 	}
-
-	res, err := fetchOne(fetch, []string{"ok0000001", "gone000002", "slow000003"}, 1.0, newState())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if rec.n() != 2 {
-		t.Fatalf("%d passes, want 2", rec.n())
-	}
-	if got := rec.calls[0].opts.Client; got != enrich.FastClient {
-		t.Errorf("pass 1 client = %q, want %q", got, enrich.FastClient)
-	}
-	if got := rec.calls[1].opts.Client; got != "" {
-		t.Errorf("pass 2 client = %q, want yt-dlp defaults", got)
-	}
-	// Only the transient failure is retried — a tombstone is permanent and
-	// re-fetching it would waste a request on every single run.
-	if strings.Join(rec.calls[1].ids, ",") != "slow000003" {
-		t.Errorf("pass 2 ids = %v, want only the transient failure", rec.calls[1].ids)
-	}
-	if len(res.Fetched) != 2 || len(res.Unavailable) != 1 || len(res.Failed) != 0 {
-		t.Errorf("merged = %+v", res)
-	}
-}
-
-// TestFetchOneSkipsFallbackWhenRateLimited: retrying into an active bot check
-// makes the throttling worse, so the second pass must be suppressed.
-func TestFetchOneSkipsFallbackWhenRateLimited(t *testing.T) {
-	var rec recorder
-	fetch := func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
-		rec.record(ids, o)
-		return enrich.ChunkResult{Failed: []string{"bot0000001"}, RateLimited: true}, nil
-	}
-	res, err := fetchOne(fetch, []string{"bot0000001"}, 1.0, newState())
+	res, err := fetchOne(fetch, []string{"ok0000001", "gone000002", "flaky00003"}, 1.0, newState())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if rec.n() != 1 {
-		t.Errorf("%d passes, want 1 — no retry while rate limited", rec.n())
+		t.Errorf("%d fetches, want exactly 1", rec.n())
 	}
-	if !res.RateLimited {
-		t.Error("RateLimited lost on the way out")
+	if len(res.Fetched) != 1 || len(res.Unavailable) != 1 || len(res.Failed) != 1 {
+		t.Errorf("res = %+v, want the fetcher's result passed straight through", res)
 	}
 }
 
