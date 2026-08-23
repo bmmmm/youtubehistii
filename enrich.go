@@ -97,12 +97,15 @@ type enrichOpts struct {
 
 	// fetch replaces the yt-dlp call. nil means enrich.FetchChunk; tests set
 	// it to drive the worker pool without a network or a binary.
-	fetch func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error)
+	fetch fetchFunc
 	// pauseUnit shortens the rate-limit pause in tests. 0 means the real one.
 	pauseUnit time.Duration
+	// state lets a test seed and then inspect the run's backoff. nil means a
+	// fresh one, which is what every real caller gets.
+	state *runState
 }
 
-func (o enrichOpts) fetcher() func([]string, enrich.FetchOpts) (enrich.ChunkResult, error) {
+func (o enrichOpts) fetcher() fetchFunc {
 	if o.fetch != nil {
 		return o.fetch
 	}
@@ -134,8 +137,8 @@ const maxBackoff = 3
 // source still works. Both start optimistic and only degrade.
 type runState struct {
 	mu           sync.Mutex
-	backoff      int           // effective sleep = configured sleep * 2^backoff
-	cookies      string        // emptied for good once yt-dlp cannot open the source
+	backoff      int    // effective sleep = configured sleep * 2^backoff
+	cookies      string // emptied for good once yt-dlp cannot open the source
 	cookieWarned bool
 	pauseUnit    time.Duration // pause per backoff step; see penalise
 }
@@ -147,7 +150,7 @@ func (s *runState) snapshot() (backoff int, cookies string) {
 }
 
 // penalise doubles the request sleep and reports the pause the caller should
-// take before pulling the next chunk. ok is false once the cap is reached.
+// take before pulling the next chunk, plus the level it reached.
 func (s *runState) penalise() (pause time.Duration, level int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -268,12 +271,16 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 	)
 	start := time.Now()
 	fetch := opts.fetcher()
-	st := &runState{cookies: resolveCookieSource(opts.cookies), pauseUnit: opts.pauseUnit}
+	st := opts.state
+	if st == nil {
+		st = &runState{cookies: resolveCookieSource(opts.cookies)}
+	}
+	st.pauseUnit = opts.pauseUnit
 	if st.pauseUnit <= 0 {
 		st.pauseUnit = 10 * time.Second
 	}
 	if st.cookies != "" {
-		fmt.Printf("using %s cookies (authenticated — set -cookies-from-browser \"\" to fetch anonymously)\n", st.cookies)
+		fmt.Printf("using %s cookies — requests are authenticated, so this run is attributable to that account\n", st.cookies)
 	}
 	jobs := make(chan []string)
 	var wg sync.WaitGroup
@@ -343,7 +350,11 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 					var level int
 					pause, level = st.penalise()
 					line += fmt.Sprintf(" — rate limited, backoff x%d, pausing %s", 1<<level, pause)
-				} else if len(res.Fetched) > 0 {
+				} else {
+					// Anything that came back without pushback counts as
+					// clean, including an all-tombstone chunk: it fetched
+					// nothing but YouTube answered every ID, so there is no
+					// reason to keep the run throttled.
 					st.recover()
 				}
 				fmt.Println(line)

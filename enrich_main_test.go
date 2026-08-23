@@ -258,6 +258,33 @@ func TestEnrichAllBacksOffAndFinishes(t *testing.T) {
 	}
 }
 
+// TestEnrichAllRecoversBackoffOnTombstoneOnlyChunk: a chunk where every video
+// turns out to be deleted or members-only fetches nothing, but YouTube did
+// answer for every ID. That is a clean chunk and must let the backoff decay —
+// tying recovery to "fetched something" left a run throttled for no reason
+// whenever it hit a patch of dead videos.
+func TestEnrichAllRecoversBackoffOnTombstoneOnlyChunk(t *testing.T) {
+	st := newState()
+	st.penalise()
+	st.penalise()
+	if before, _ := st.snapshot(); before != 2 {
+		t.Fatalf("setup: backoff = %d, want 2", before)
+	}
+
+	opts := enrichOpts{
+		chunk: 1, workers: 1, pauseUnit: time.Millisecond, state: st,
+		fetch: func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
+			return enrich.ChunkResult{Unavailable: ids}, nil
+		},
+	}
+	if err := runEnrichAll(t, paths{dataDir: t.TempDir()}, viewsN(3), opts); err != nil {
+		t.Fatal(err)
+	}
+	if after, _ := st.snapshot(); after != 0 {
+		t.Errorf("backoff = %d after 3 clean tombstone chunks, want it decayed to 0", after)
+	}
+}
+
 func TestResolveCookieSource(t *testing.T) {
 	for _, tc := range []struct{ in, want string }{
 		{"", ""},
