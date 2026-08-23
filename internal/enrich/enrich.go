@@ -83,6 +83,10 @@ func (c Cache) Has(id string) bool {
 	return err == nil
 }
 
+// Write stores one entry atomically (temp file + rename). A plain write would
+// leave truncated JSON behind on a crash, and that is worse than no entry at
+// all: Has() would report the video as cached so it never gets refetched, and
+// ReadAll would fail the WHOLE cache on the one unparseable file.
 func (c Cache) Write(m Meta) error {
 	p, err := c.path(m.ID)
 	if err != nil {
@@ -95,7 +99,44 @@ func (c Cache) Write(m Meta) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, append(b, '\n'), 0o644)
+	tmp, err := os.CreateTemp(c.Dir, ".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(b, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), p)
+}
+
+// IDs returns every cached video ID from a single directory read. Callers that
+// need to test thousands of IDs use this instead of Has, which costs one
+// os.Stat each.
+func (c Cache) IDs() (map[string]bool, error) {
+	out := map[string]bool{}
+	entries, err := os.ReadDir(c.Dir)
+	if os.IsNotExist(err) {
+		return out, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		out[strings.TrimSuffix(name, ".json")] = true
+	}
+	return out, nil
 }
 
 // ReadAll loads the whole cache into memory (a few KB per video).
@@ -130,6 +171,15 @@ type ChunkResult struct {
 	Fetched     []Meta
 	Unavailable []string // gone for good -> tombstone
 	Failed      []string // transient (network, rate limit) -> retry next run
+
+	// RateLimited means YouTube pushed back on the request rate rather than
+	// on any individual video. The caller should slow down instead of
+	// burning through the remaining chunks failing every one of them.
+	RateLimited bool
+	// CookiesFailed means --cookies-from-browser could not be honoured at
+	// all (locked profile, denied keychain, unknown browser). The caller
+	// should retry this chunk without cookies and stop passing them.
+	CookiesFailed bool
 }
 
 // errLineRe matches yt-dlp error lines, e.g.
@@ -142,6 +192,46 @@ var errLineRe = regexp.MustCompile(`ERROR: \[[^\]]+\] ([A-Za-z0-9_-]{6,20}): (.*
 // "confirm you're not a bot" message, which signals IP-level rate limiting
 // and is transient (retry later, don't tombstone).
 var goneMarkers = []string{"unavailable", "private", "removed", "terminated", "not available", "confirm your age"}
+
+// rateLimitMarkers mean YouTube is throttling this IP or account — nothing is
+// wrong with the video, we are simply going too fast. Matched on "not a bot"
+// rather than the full sentence because yt-dlp emits it with a typographic
+// apostrophe ("you’re"), which is easy to miss with an ASCII literal.
+var rateLimitMarkers = []string{"not a bot", "too many requests", "http error 429"}
+
+// cookieErrorMarkers appear on plain ERROR lines (no per-video prefix) when
+// --cookies-from-browser cannot be honoured at all.
+var cookieErrorMarkers = []string{
+	"cookies database", "cookie database", "unable to decrypt", "failed to decrypt",
+	"unsupported browser", "could not find", "no such profile",
+}
+
+// isRateLimit reports whether a lowercased yt-dlp message is rate limiting.
+func isRateLimit(msg string) bool {
+	for _, marker := range rateLimitMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// cookiesUnusable reports whether stderr shows yt-dlp failing on the cookie
+// source itself. Deliberately scoped to lines that also mention cookies, so a
+// generic "could not find" about something else never disables cookies.
+func cookiesUnusable(stderr string) bool {
+	for _, line := range strings.Split(strings.ToLower(stderr), "\n") {
+		if !strings.Contains(line, "cookie") {
+			continue
+		}
+		for _, marker := range cookieErrorMarkers {
+			if strings.Contains(line, marker) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 // ClassifyErrors splits the IDs missing from stdout into gone vs. transient,
 // based on yt-dlp's stderr.
@@ -172,8 +262,33 @@ func ClassifyErrors(stderr string, missing []string) (gone, failed []string) {
 	return gone, failed
 }
 
+// ytDLPBin is the binary FetchChunk shells out to. A variable so tests can
+// point it at a fake that reproduces yt-dlp's stdout/stderr/exit-code shape
+// without touching the network.
+var ytDLPBin = "yt-dlp"
+
+// FetchOpts tunes one yt-dlp invocation.
+type FetchOpts struct {
+	// Sleep is passed to --sleep-requests: seconds between HTTP requests.
+	Sleep float64
+	// Client pins youtube:player_client. Empty means yt-dlp's own default,
+	// which queries TWO clients (android_vr + web_safari) and therefore pays
+	// roughly one extra sleeping request per video. Pinning a single client
+	// returns the same fields we keep — measured at ~23 % less wall clock —
+	// but a handful of videos only come back from the other client, which is
+	// what the caller's fallback pass is for.
+	Client string
+	// Cookies is passed to --cookies-from-browser. Empty means no cookies.
+	Cookies string
+}
+
+// FastClient is the single player client the first pass pins. Chosen because
+// it needs no PO token and still carries microformat (category) and
+// videoDetails.keywords (tags).
+const FastClient = "android_vr"
+
 // FetchChunk asks yt-dlp for metadata of the given IDs in one invocation.
-func FetchChunk(ids []string, sleepSeconds float64) (ChunkResult, error) {
+func FetchChunk(ids []string, opts FetchOpts) (ChunkResult, error) {
 	batch, err := os.CreateTemp("", "youtubehistii-batch-*.txt")
 	if err != nil {
 		return ChunkResult{}, err
@@ -189,10 +304,19 @@ func FetchChunk(ids []string, sleepSeconds float64) (ChunkResult, error) {
 		return ChunkResult{}, err
 	}
 
-	cmd := exec.Command("yt-dlp",
+	args := []string{
 		"-j", "--ignore-errors", "--no-warnings", "--no-progress",
-		"--sleep-requests", fmt.Sprintf("%g", sleepSeconds),
-		"-a", batch.Name())
+		"--sleep-requests", fmt.Sprintf("%g", opts.Sleep),
+	}
+	if opts.Client != "" {
+		args = append(args, "--extractor-args", "youtube:player_client="+opts.Client)
+	}
+	if opts.Cookies != "" {
+		args = append(args, "--cookies-from-browser", opts.Cookies)
+	}
+	args = append(args, "-a", batch.Name())
+
+	cmd := exec.Command(ytDLPBin, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -228,11 +352,23 @@ func FetchChunk(ids []string, sleepSeconds float64) (ChunkResult, error) {
 	// all-private/all-deleted still gets a per-ID reason for every ID and
 	// must not kill the rest of a long run — that's what ClassifyErrors below
 	// is for.
-	if len(res.Fetched) == 0 && runErr != nil && !errLineRe.MatchString(stderr.String()) {
-		return ChunkResult{}, fmt.Errorf("yt-dlp: %w\n%s", runErr, lastLines(stderr.String(), 5))
+	errText := stderr.String()
+
+	// A cookie source yt-dlp cannot open is a configuration problem, not a
+	// fetch failure: the caller recovers by retrying the chunk without
+	// cookies. So it must neither be fatal nor tombstone anything.
+	if opts.Cookies != "" && cookiesUnusable(errText) {
+		res.Failed = missing
+		res.CookiesFailed = true
+		return res, nil
 	}
 
-	res.Unavailable, res.Failed = ClassifyErrors(stderr.String(), missing)
+	if len(res.Fetched) == 0 && runErr != nil && !errLineRe.MatchString(errText) {
+		return ChunkResult{}, fmt.Errorf("yt-dlp: %w\n%s", runErr, lastLines(errText, 5))
+	}
+
+	res.Unavailable, res.Failed = ClassifyErrors(errText, missing)
+	res.RateLimited = isRateLimit(strings.ToLower(errText))
 	return res, nil
 }
 
