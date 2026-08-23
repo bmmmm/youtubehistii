@@ -1,44 +1,63 @@
 # youtubehistii classification rules — copy to config/rules.yaml and edit.
 #
-# This example is deliberately generic: it demonstrates the format, not a
-# recommended taxonomy. Replace the topics with the ones that describe YOUR
-# watching — the more discriminating they are, the better both stages work.
-#
 # Two axes per video:
-#   topic — free-form slug, convention "<area>/<sub>" (e.g. tech/talks)
+#   topic — "<area>" or "<area>/<sub>", two levels with different sources:
+#           the AREA comes from YouTube's own category, which every enriched
+#           video already carries; the SUB is free — the LLM invents it per
+#           video ("gaming/factorio" appears without anyone configuring it)
+#           and rules may name one directly.
 #   mode  — consume | learn | mixed
 #
 # Stage 1 walks `rules` top to bottom; the FIRST matching rule wins, so put
-# specific rules (channels) before broad fallbacks (YouTube categories).
-# Stage 2 sends whatever stage 1 left unmatched to the local LLM (oMLX),
-# constrained to the topics listed here. Every verdict records its source
-# (rule id or model name) — nothing is classified invisibly.
+# specific rules (channels) before broad ones. Stage 2 sends whatever stage 1
+# left unmatched to the local LLM (oMLX) — but with the area already fixed by
+# the YouTube category, so the model is only asked the two things no metadata
+# answers: the specific subject, and consume vs. learn. Every verdict records
+# its source (rule id or model name) — nothing is classified invisibly.
 
 llm:
   model: Qwen3.5-9B-MLX-4bit # any model your oMLX server has pulled
   # base_url: http://127.0.0.1:8000/v1   # default; or env OMLX_URL
 
-# The taxonomy. `desc` is shown to the LLM, so make it discriminating.
-# A topic with id "unclear" is required — it is the model's escape hatch.
-topics:
-  - id: gaming
-    desc: video game content — gameplay, let's plays, esports
-  - id: tech/talks
-    desc: software engineering conference talks and technical deep dives
-  - id: tech/tutorials
-    desc: programming tutorials, courses, how-tos
-  - id: science
-    desc: science, engineering, documentaries
-  - id: news
-    desc: news, politics, commentary
-  - id: music
-    desc: music videos, live sets, concerts
-  - id: sports
-    desc: sports broadcasts, highlights, analysis
-  - id: entertainment
-    desc: comedy, vlogs, memes, everything watched purely for fun
-  - id: unclear
-    desc: cannot tell from the available metadata
+# The AREAS are YouTube's own categories by default — there is nothing to
+# configure, and that is the point: the uploader already picked one, it is in
+# the metadata for free, and reproducing that judgement with a model would buy
+# a dependency for a decision that is already made. The ids are the category
+# names slugified:
+#
+#   film-animation · autos-vehicles · music · pets-animals · sports
+#   short-movies · travel-events · gaming · videoblogging · people-blogs
+#   comedy · entertainment · news-politics · howto-style · education
+#   science-technology · nonprofits-activism · shorts · shows · trailers
+#   unclear
+#
+# Two of them — entertainment and people-blogs — are YouTube's catch-alls:
+# uploaders pick them when nothing fits, so they hold anything. The free sub
+# level is what makes them readable; leave the sorting-out to a later pass
+# over the finished report rather than guessing at classification time.
+#
+# Uncomment `topics:` ONLY to replace that list with your own areas. It is a
+# replacement, not an addition: with an own taxonomy the YouTube categories
+# stop mapping and the LLM decides every area again. Ids must not contain "/",
+# an area with id "unclear" is required, and `desc` is shown to the LLM.
+# Changing this list invalidates cached verdicts and re-classifies.
+#
+# topics:
+#   - id: gaming
+#     desc: video game content — gameplay, let's plays, esports
+#   - id: tech
+#     desc: software, engineering and hardware — talks, tutorials, deep dives
+#   - id: unclear
+#     desc: cannot tell from the available metadata
+
+# Optional: fold drifted subs together after seeing real output — the model
+# may write both "counter-strike" and "cs2" for the same thing. Aliases are
+# applied when verdicts are read back, so folding costs no re-classification.
+# Creator tags come in spelling variants ("hip hop"/"hiphop", "fussball"/
+# "fußball"), and the subs built from them inherit that; this is where it gets
+# cleaned up.
+# sub_aliases:
+#   cs2: counter-strike
 
 # Matchers per rule (all optional, all case-insensitive; a rule fires when
 # ANY of its listed values matches its field):
@@ -47,54 +66,48 @@ topics:
 #   tag_any      — exact creator tag (only after `enrich`)
 #   text_any     — substring of title OR any tag
 #   category_any — official YouTube category (only after `enrich`)
+#
+# Matchers are OR-ed, across fields too: a rule with both `category_any` and
+# `text_any` fires on EITHER, not on both. There is no AND — write the narrow
+# matcher alone.
+#
+# A rule ENDS the classification: it sets topic and mode and the LLM never
+# sees the video. That makes rules worth writing for exactly two things:
+#
+#   1. cases where you CONTRADICT YouTube's category, and
+#   2. subjects whose name you want spelled one fixed way.
+#
+# What is NOT worth a rule any more is restating a category ("Gaming means
+# gaming") — that is the default now. Note the cost of (2): a rule also
+# decides the mode, so a video it catches never gets a mode judged from its
+# content. Use it where the answer is genuinely always the same.
 rules:
   # --- channels: the strongest signal. List the handful of channels you watch
   # most; one exact name per entry, and put these rules first.
   - id: conference-channel
     channel_any: ["Example Conference Channel"]
-    topic: tech/talks
+    topic: science-technology/talks
     mode: learn
 
   # --- title keywords
   - id: conference-talk
     title_any: ["keynote", "conf talk", "conference"]
-    topic: tech/talks
-    mode: learn
-  - id: tutorial
-    title_any: ["tutorial", "how to", "crash course", "explained"]
-    topic: tech/tutorials
+    topic: science-technology/talks
     mode: learn
 
-  # --- text_any looks in the title AND in the creator tags
-  - id: gameplay
-    text_any: ["gameplay", "let's play", "walkthrough", "speedrun"]
-    topic: gaming
+  # --- text_any looks in the title AND in the creator tags. Naming the sub
+  # here also seeds the model's vocabulary: it reuses "cs2" instead of
+  # inventing "counter-strike-2" on the next batch.
+  - id: cs2
+    text_any: ["cs2", "counter-strike"]
+    topic: gaming/cs2
     mode: consume
 
-  # --- tag_any needs an EXACT creator tag (available only after `enrich`)
-  - id: live-music
-    tag_any: ["live session", "live concert"]
-    topic: music
+  # --- category_any moves a WHOLE category somewhere else. Repeating the
+  # default ("Gaming" -> gaming) is pointless now; merging the tiny categories
+  # into a bigger one is not. It is also the only way to place a category if
+  # you replaced `topics:` with your own areas.
+  - id: fold-tiny-film-categories
+    category_any: ["Trailers", "Short Movies"]
+    topic: film-animation
     mode: consume
-
-  # --- broad fallbacks via official YouTube category (needs `enrich`)
-  - id: category-gaming
-    category_any: ["Gaming"]
-    topic: gaming
-    mode: consume
-  - id: category-music
-    category_any: ["Music"]
-    topic: music
-    mode: consume
-  - id: category-sports
-    category_any: ["Sports"]
-    topic: sports
-    mode: consume
-  - id: category-news
-    category_any: ["News & Politics"]
-    topic: news
-    mode: consume
-  - id: category-education
-    category_any: ["Education", "Science & Technology"]
-    topic: science
-    mode: learn

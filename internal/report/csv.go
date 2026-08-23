@@ -9,21 +9,25 @@ import (
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/rules"
 )
 
 // WriteCSV exports every classified view as one flat row.
 func WriteCSV(w io.Writer, rows []classify.Verdict, subscribed map[string]bool) error {
 	cw := csv.NewWriter(w)
+	// "topic" is the full "<area>/<sub>"; "area" repeats just the fixed level
+	// so a pivot can group on it without splitting strings.
 	header := []string{"videoID", "title", "channel", "channelID", "watchedAt",
-		"topic", "mode", "source", "confidence", "durationS", "subscribed", "unavailable"}
+		"topic", "area", "mode", "source", "confidence", "durationS", "subscribed", "unavailable"}
 	if err := cw.Write(header); err != nil {
 		return err
 	}
 	for _, r := range rows {
+		area, _ := rules.SplitTopic(r.Topic)
 		rec := []string{
 			r.VideoID, r.Title, r.Channel, r.ChannelID,
 			fmtTime(r.WatchedAt),
-			r.Topic, r.Mode, r.Source,
+			r.Topic, area, r.Mode, r.Source,
 			fmtConf(r.Confidence),
 			fmt.Sprintf("%d", r.DurationS),
 			fmt.Sprintf("%t", r.ChannelID != "" && subscribed[r.ChannelID]),

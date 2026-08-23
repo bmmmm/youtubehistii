@@ -35,13 +35,22 @@ Usage:
                                   most-watched videos are fetched first, safe to interrupt)
   youtubehistii classify          rules first, then local LLM (oMLX) -> data/classified.jsonl
                                   (flags: -llm-batch 10, -llm-workers 1, -llm-limit N,
-                                  -no-llm, -include-unenriched; only enriched or
-                                  tombstoned videos are sent to the LLM)
+                                  -no-llm, -include-unenriched, -keep-verdicts; only
+                                  enriched or tombstoned videos are sent to the LLM.
+                                  Topics have two levels: the AREA is YouTube's own
+                                  category, taken straight from the metadata without
+                                  asking a model, and the SUB is free — the LLM picks
+                                  it per video, along with the mode. Videos without a
+                                  category keep their area open to the LLM too)
   youtubehistii run               enrich and classify together: metadata fetching runs
                                   continuously, classification catches up in waves
                                   (every 60s or 200 new videos), final report at the
                                   end — takes both commands' flags, Ctrl-C safe,
                                   rerun to resume
+  youtubehistii inspect           what the metadata cache holds: youtube category
+                                  distribution and creator tags, to decide the
+                                  taxonomy from the data (flags: -tags,
+                                  -tags-per-category 15; read-only, no LLM)
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
   youtubehistii version           print version
 
@@ -67,6 +76,8 @@ func main() {
 		err = cmdClassify(args)
 	case "run":
 		err = cmdRun(args)
+	case "inspect":
+		err = cmdInspect(args)
 	case "report":
 		err = cmdReport(args)
 	case "version", "--version", "-v":

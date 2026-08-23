@@ -25,8 +25,9 @@ func RenderHTML(st *Stats, generated time.Time) ([]byte, error) {
 			}
 			return part / total * 100
 		},
-		"f1": func(v float64) string { return fmt.Sprintf("%.1f", v) },
-		"f0": func(v float64) string { return fmt.Sprintf("%.0f", v) },
+		"subs": subLine, // the free second level, same rendering as the terminal
+		"f1":   func(v float64) string { return fmt.Sprintf("%.1f", v) },
+		"f0":   func(v float64) string { return fmt.Sprintf("%.0f", v) },
 		"date": func(t time.Time) string {
 			if t.IsZero() {
 				return "—"
@@ -140,6 +141,7 @@ body {
 h1 { font-size: 1.6rem; margin-bottom: .2rem; }
 h2 { font-size: 1.15rem; margin: 2.2rem 0 .6rem; border-bottom: 1px solid var(--line); padding-bottom: .3rem; }
 .muted { color: var(--muted); font-size: .85rem; }
+.sub { margin-top: .15rem; font-size: .75rem; }
 .cards { display: flex; flex-wrap: wrap; gap: .8rem; margin: 1rem 0; }
 .card { background: var(--card); border-radius: .5rem; padding: .7rem 1rem; min-width: 8.5rem; }
 .card .n { font-size: 1.35rem; font-weight: 600; }
@@ -173,7 +175,7 @@ td.num, th.num { text-align: right; }
   <div class="card"><div class="n">{{.S.Views}}</div><div class="muted">views</div></div>
   <div class="card"><div class="n">{{.S.UniqueVideos}}</div><div class="muted">unique videos</div></div>
   <div class="card"><div class="n">≤ {{f0 .S.HoursUpper}} h</div><div class="muted">watch time (upper bound)</div></div>
-  <div class="card"><div class="n">{{index .S.Sources "rule"}} / {{index .S.Sources "llm"}} / {{index .S.Sources "unclassified"}}</div><div class="muted">via rules / LLM / open</div></div>
+  <div class="card"><div class="n">{{index .S.Sources "rule"}} / {{index .S.Sources "llm"}} / {{index .S.Sources "category"}} / {{index .S.Sources "unclassified"}}</div><div class="muted">via rules / LLM / category only / open</div></div>
 </div>
 
 <p class="note">Takeout has no per-view watch duration, so hour figures assume
@@ -186,7 +188,7 @@ each video was watched in full — an upper bound. View counts are exact.
 <tr><th>topic</th><th>mode</th><th class="num">views</th><th class="num">≤ hours</th><th></th></tr>
 {{range .S.Topics}}
 <tr>
-  <td>{{.Topic}}</td>
+  <td>{{.Topic}}{{with subs .Subs 8}}<div class="muted sub">{{.}}</div>{{end}}</td>
   <td><span class="mode {{.Mode}}">{{.Mode}}</span></td>
   <td class="num">{{.Views}}</td>
   <td class="num">{{f1 .Hours}}</td>

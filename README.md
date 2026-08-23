@@ -84,9 +84,55 @@ shown. Top-channel tables mark subscribed channels.
 
 ## Configuration
 
-Copy `config/rules.example.yaml` to `config/rules.yaml` and adapt the
-taxonomy and rules — the file documents the format. `OMLX_URL` / `OMLX_API_KEY`
+Copy `config/rules.example.yaml` to `config/rules.yaml` and adapt the rules —
+the file documents the format. Out of the box there is no taxonomy to write:
+the areas are YouTube's own categories. `OMLX_URL` / `OMLX_API_KEY`
 environment variables override the LLM endpoint settings.
+
+### Topics have two levels, from two different places
+
+A topic is `<area>` or `<area>/<sub>`, and the two levels do not come from the
+same source:
+
+- **areas** are YouTube's own categories, slugified (`science-technology`,
+  `news-politics`, `gaming`, …). Every enriched video already carries one —
+  the uploader picked it in the upload form — so the area costs neither a rule
+  nor a model call. It also holds when the LLM is off or unreachable; such rows
+  are reported as *area-only from the category*.
+- **subs** are free. The model invents one per video — `gaming/factorio`
+  appears without anyone configuring it — and rules may name one directly
+  (`topic: gaming/cs2`). Each request seeds the model with the subs already in
+  use, so the vocabulary converges instead of fanning out.
+
+That leaves the LLM exactly the two questions no metadata answers: which
+specific subject, and consume vs. learn. It picks an area only for videos that
+have no category at all — deleted or age-restricted ones, and anything `enrich`
+has not reached yet.
+
+Two of YouTube's categories, **Entertainment** and **People & Blogs**, are
+catch-alls: uploaders pick them when nothing fits, so they hold anything. They
+stay as areas rather than being second-guessed at classification time — the
+free sub level is what makes them readable.
+
+Rules are worth writing for two things now: contradicting YouTube's category,
+and pinning a subject's spelling. Restating a category (`Gaming` → `gaming`) is
+default behaviour. Note that a rule ends the classification — it sets topic and
+mode and the video never reaches the LLM, so a video it catches gets no sub
+beyond what the rule names and no mode judged from its content.
+
+You can replace the areas wholesale by uncommenting `topics:`. It is a
+replacement, not an addition: with an own taxonomy the YouTube categories stop
+mapping and the LLM decides every area again, so `category_any` rules become
+the way to place them.
+
+Every cached verdict records a fingerprint of the areas it was judged under.
+**Editing `topics:` therefore re-classifies every cached verdict** — the run
+says so before it starts (`taxonomy changed (… → …): re-asking N cached
+verdicts`). Use `-keep-verdicts` when you only reworded a `desc` and do not
+want to pay for a full re-ask. Enriched metadata is never affected.
+
+If the model spells one subject two ways, fold them with `sub_aliases:` — those
+are applied when verdicts are read back, so folding costs no re-classification.
 
 ## Honesty note on "time spent"
 

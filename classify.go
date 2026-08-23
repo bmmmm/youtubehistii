@@ -21,29 +21,32 @@ import (
 
 // llmFlags are the classification flags shared by "classify" and "run".
 type llmFlags struct {
-	rulesPath  *string
-	noLLM      *bool
-	llmLimit   *int
-	llmBatch   *int
-	llmWorkers *int
+	rulesPath    *string
+	noLLM        *bool
+	llmLimit     *int
+	llmBatch     *int
+	llmWorkers   *int
+	keepVerdicts *bool
 }
 
 func addLLMFlags(fs *flag.FlagSet) llmFlags {
 	return llmFlags{
-		rulesPath:  fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)"),
-		noLLM:      fs.Bool("no-llm", false, "skip the LLM stage, rules only"),
-		llmLimit:   fs.Int("llm-limit", 0, "ask the LLM about at most N videos this run (0 = all)"),
-		llmBatch:   fs.Int("llm-batch", 10, "videos per LLM request (1 = one request per video)"),
-		llmWorkers: fs.Int("llm-workers", 1, "parallel LLM requests (raise only if the server actually decodes concurrently)"),
+		rulesPath:    fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)"),
+		noLLM:        fs.Bool("no-llm", false, "skip the LLM stage, rules only"),
+		llmLimit:     fs.Int("llm-limit", 0, "ask the LLM about at most N videos this run (0 = all)"),
+		llmBatch:     fs.Int("llm-batch", 10, "videos per LLM request (1 = one request per video)"),
+		llmWorkers:   fs.Int("llm-workers", 1, "parallel LLM requests (raise only if the server actually decodes concurrently)"),
+		keepVerdicts: fs.Bool("keep-verdicts", false, "keep cached verdicts even though the taxonomy changed (for a reworded desc — a changed area list needs a re-ask)"),
 	}
 }
 
 func (lf llmFlags) opts() classifyOpts {
 	return classifyOpts{
-		noLLM:      *lf.noLLM,
-		llmLimit:   *lf.llmLimit,
-		llmBatch:   *lf.llmBatch,
-		llmWorkers: *lf.llmWorkers,
+		noLLM:        *lf.noLLM,
+		llmLimit:     *lf.llmLimit,
+		llmBatch:     *lf.llmBatch,
+		llmWorkers:   *lf.llmWorkers,
+		keepVerdicts: *lf.keepVerdicts,
 	}
 }
 
@@ -88,6 +91,7 @@ type classifyOpts struct {
 	llmBatch          int  // videos per LLM request (<=1 = single requests)
 	llmWorkers        int  // parallel LLM requests
 	includeUnenriched bool // ask title-only even without a meta cache entry
+	keepVerdicts      bool // do not re-ask verdicts just because the taxonomy changed
 	progress          bool // per-stage prints (off in wave mode — run prints wave lines)
 }
 
@@ -111,29 +115,38 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 	var st passStats
 
 	// Per unique video: build the matcher input (canonical metadata wins,
-	// the takeout row fills the gaps) and run stage 1.
-	inputs := map[string]rules.Input{}
+	// the takeout row fills the gaps), derive the area from the YouTube
+	// category, and run stage 1.
+	//
+	// The category IS the area. Every enriched video carries one, the uploader
+	// picked it at upload time, and it costs neither a rule nor a model call —
+	// so the LLM is left with the two questions no metadata answers: which
+	// specific subject (the sub), and consume or learn (the mode). Only videos
+	// with no category at all (tombstoned or not yet enriched) still have their
+	// area decided by the model.
+	items := map[string]classify.Item{}
 	for _, v := range views {
 		if v.VideoID == "" {
 			continue
 		}
-		if _, done := inputs[v.VideoID]; done {
+		if _, done := items[v.VideoID]; done {
 			continue
 		}
-		in := rules.Input{Title: v.Title, Channel: v.Channel}
+		item := classify.Item{Input: rules.Input{Title: v.Title, Channel: v.Channel}}
 		if m, ok := metas[v.VideoID]; ok && !m.Unavailable {
 			if m.Title != "" {
-				in.Title = m.Title
+				item.Title = m.Title
 			}
 			if m.Channel != "" {
-				in.Channel = m.Channel
+				item.Channel = m.Channel
 			}
-			in.Tags = m.Tags
-			in.Categories = m.Categories
+			item.Tags = m.Tags
+			item.Categories = m.Categories
+			item.Area, _ = cfg.AreaForCategory(rules.FirstCategory(m.Categories))
 		}
-		inputs[v.VideoID] = in
+		items[v.VideoID] = item
 	}
-	st.unique = len(inputs)
+	st.unique = len(items)
 
 	type videoVerdict struct {
 		topic, mode, source string
@@ -141,8 +154,8 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 	}
 	verdicts := map[string]videoVerdict{}
 	var needLLM []string
-	for id, in := range inputs {
-		if topic, mode, ruleID, ok := cfg.Match(in); ok {
+	for id, item := range items {
+		if topic, mode, ruleID, ok := cfg.Match(item.Input); ok {
 			verdicts[id] = videoVerdict{topic: topic, mode: mode, source: "rule:" + ruleID}
 		} else {
 			needLLM = append(needLLM, id)
@@ -151,22 +164,67 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 	st.ruleHits = len(verdicts)
 	sort.Strings(needLLM)
 	if opts.progress {
-		fmt.Printf("%d unique videos: %d matched by rules, %d for the LLM\n",
-			len(inputs), len(verdicts), len(needLLM))
+		withArea := 0
+		for _, id := range needLLM {
+			if items[id].Area != "" {
+				withArea++
+			}
+		}
+		fmt.Printf("%d unique videos: %d matched by rules, %d for the LLM (%d of those with the area already fixed by their YouTube category)\n",
+			len(items), len(verdicts), len(needLLM), withArea)
 	}
 
 	// Stage 2 — cached LLM verdicts first, then select what to ask live. A
 	// stale title-only verdict stays in place as a fallback until its re-ask
 	// (with full metadata) lands, so an oMLX outage never loses coverage.
 	llmCache := classify.Cache{Dir: p.classifyCache()}
+	taxonomy := cfg.Fingerprint()
 	var live []string
-	cachedHits := 0
+	cachedHits, taxonomyStale := 0, 0
+	oldTaxonomies := map[string]bool{}
 	for _, id := range needLLM {
 		m, hasMeta := metas[id]
 		if v, ok := cached[id]; ok {
-			verdicts[id] = videoVerdict{topic: v.Topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
-			cachedHits++
-			if v.Stale(hasMeta, m.Unavailable) {
+			// Canonicalize on read, so a sub alias added after a run folds
+			// old verdicts on the next pass without asking the LLM again.
+			topic, usable := cfg.NormalizeTopic(v.Topic)
+			// The category decides the area — a cached verdict is no
+			// exception. An older taxonomy that spelled it differently
+			// ("politics" for what is now "news-politics") must not outvote
+			// it, and an area that no longer exists at all must not survive
+			// as a dead label: with the LLM off or down, that stopgap was
+			// what a report ended up showing.
+			//
+			// The sub goes WITH the area it was judged under. It answered
+			// "which subject within THIS area", so under a different one it
+			// is not a weaker answer but a wrong one — that is how
+			// "sports/other" and "people-blogs/tutorials" got into a report,
+			// out of the old "gaming/other" and "dev/tutorials". Where the
+			// area is unchanged (a reworded desc, a new alias) the sub still
+			// stands. Either way a re-ask is queued below.
+			if area := items[id].Area; area != "" {
+				oldArea, _ := rules.SplitTopic(v.Topic)
+				if strings.EqualFold(strings.TrimSpace(oldArea), area) {
+					topic, usable = cfg.ReplaceArea(v.Topic, area), true
+				} else {
+					topic, usable = area, true
+				}
+			}
+			if usable {
+				verdicts[id] = videoVerdict{topic: topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
+				cachedHits++
+			}
+			// -keep-verdicts pins the check to whatever the verdict already
+			// carries, so a taxonomy change cannot make it stale and only the
+			// metadata rule still applies.
+			want := taxonomy
+			if opts.keepVerdicts {
+				want = v.Taxonomy
+			} else if v.Taxonomy != taxonomy {
+				taxonomyStale++
+				oldTaxonomies[v.Taxonomy] = true
+			}
+			if v.Stale(want, hasMeta, m.Unavailable) {
 				live = append(live, id)
 			}
 			continue
@@ -176,6 +234,20 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		} else {
 			st.waiting++
 		}
+	}
+	// Always reported, progress or not: re-asking the cache is the most
+	// expensive thing a taxonomy edit can trigger, so it is never silent.
+	if taxonomyStale > 0 {
+		olds := make([]string, 0, len(oldTaxonomies))
+		for t := range oldTaxonomies {
+			if t == "" {
+				t = "none" // pre-fingerprint verdicts
+			}
+			olds = append(olds, t)
+		}
+		sort.Strings(olds)
+		fmt.Printf("taxonomy changed (%s → %s): re-asking %d cached verdicts\n",
+			strings.Join(olds, ", "), taxonomy, taxonomyStale)
 	}
 	if opts.progress {
 		fmt.Printf("LLM: %d cached verdicts, %d to ask, %d waiting for enrich\n",
@@ -209,6 +281,17 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			fmt.Printf("asking %s (model %s)\n", client.BaseURL, client.Model)
 		}
 
+		// What the model gets to reuse: every sub already assigned, by rules
+		// and by cached verdicts alike.
+		topicsSoFar := make([]string, 0, len(verdicts)+len(cached))
+		for _, v := range verdicts {
+			topicsSoFar = append(topicsSoFar, v.topic)
+		}
+		for _, v := range cached {
+			topicsSoFar = append(topicsSoFar, v.Topic)
+		}
+		seeds := collectSubSeeds(cfg, topicsSoFar)
+
 		basisFor := func(id string) string {
 			if m, ok := metas[id]; ok && !m.Unavailable {
 				return classify.BasisFull
@@ -218,9 +301,10 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		batchSize := max(opts.llmBatch, 1)
 		workers := max(opts.llmWorkers, 1)
 		var (
-			mu    sync.Mutex
-			fatal error
-			done  int
+			mu            sync.Mutex
+			fatal         error
+			done          int
+			areaOverrides int // model answers whose area contradicted the category
 		)
 		// The helpers below must be called under mu.
 		connLost := func(err error) {
@@ -230,8 +314,20 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			llmDown = true
 		}
 		store := func(id string, v classify.LLMVerdict) {
+			// Where the YouTube category fixed the area, the answer's area is
+			// not a judgement to respect but a field that may have drifted:
+			// keep the sub the model found and put the area back. The prompt
+			// says as much, so a mismatch is a prompt-quality signal, counted
+			// and reported rather than silently corrected.
+			if area := items[id].Area; area != "" {
+				if fixed := cfg.ReplaceArea(v.Topic, area); fixed != v.Topic {
+					areaOverrides++
+					v.Topic = fixed
+				}
+			}
 			v.Model = client.Model
 			v.Basis = basisFor(id)
+			v.Taxonomy = taxonomy
 			if err := llmCache.Write(id, v); err != nil {
 				if fatal == nil {
 					fatal = err
@@ -246,11 +342,11 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		process := func(ids []string) {
 			rest := ids
 			if len(ids) > 1 {
-				items := make([]rules.Input, len(ids))
+				batch := make([]classify.Item, len(ids))
 				for i, id := range ids {
-					items[i] = inputs[id]
+					batch[i] = items[id]
 				}
-				system, user := classify.BuildBatchPrompt(cfg, items)
+				system, user := classify.BuildBatchPrompt(cfg, batch, seeds)
 				// max_tokens scales with the batch: ~15 tokens per verdict
 				// line plus headroom, so replies are never cut off mid-line.
 				reply, err := client.ChatMax(system, user, 30*len(ids)+200)
@@ -265,7 +361,12 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 					mu.Unlock()
 				} else if batch, perr := classify.ParseBatchVerdicts(cfg, ids, reply); perr != nil {
 					mu.Lock()
-					parseWarnings = append(parseWarnings, fmt.Sprintf("batch of %d: %v", len(ids), perr))
+					// The parse error alone says a batch failed, not why. The
+					// head of the reply does — a wrong field order, a code
+					// fence, a reasoning preamble all look different, and the
+					// fallback that follows costs one request PER video.
+					parseWarnings = append(parseWarnings,
+						fmt.Sprintf("batch of %d: %v\n    reply began: %s", len(ids), perr, replyHead(reply)))
 					mu.Unlock()
 				} else {
 					mu.Lock()
@@ -285,7 +386,7 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 				if stop {
 					return
 				}
-				v, err := askLLM(client, cfg, inputs[id])
+				v, err := askLLM(client, cfg, items[id], seeds)
 				mu.Lock()
 				switch {
 				case err != nil && isConnErr(err):
@@ -331,6 +432,10 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		if fatal != nil {
 			return st, fatal
 		}
+		if areaOverrides > 0 && opts.progress {
+			fmt.Printf("%d of %d answers named an area other than the fixed one — the category won\n",
+				areaOverrides, st.llmNew)
+		}
 	}
 	if len(parseWarnings) > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d LLM replies rejected (single-request fallback ran where possible), first %d:\n",
@@ -339,6 +444,23 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			fmt.Fprintf(os.Stderr, "  %s\n", w)
 		}
 	}
+	// Whatever the LLM did not answer still keeps the area its YouTube
+	// category gives it. That fact does not depend on a model being up, on
+	// -no-llm or on -llm-limit — only the sub and the mode do, and the source
+	// says which half is missing. Without this the whole redesign would hand
+	// the area back to the LLM through the back door.
+	categoryOnly := 0
+	for id, item := range items {
+		if _, done := verdicts[id]; done || item.Area == "" {
+			continue
+		}
+		verdicts[id] = videoVerdict{topic: item.Area, source: "category"}
+		categoryOnly++
+	}
+	if categoryOnly > 0 && opts.progress {
+		fmt.Printf("%d videos carry their category's area but no sub or mode yet\n", categoryOnly)
+	}
+
 	st.llmDown = llmDown
 	st.classified = len(verdicts)
 
@@ -390,12 +512,14 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 				bySource["rule"]++
 			case strings.HasPrefix(r.Source, "llm:"):
 				bySource["llm"]++
+			case r.Source == "category":
+				bySource["category"]++
 			default:
 				bySource["unclassified"]++
 			}
 		}
-		fmt.Printf("wrote %s: %d views (%d via rules, %d via llm, %d unclassified)\n",
-			p.classifiedJSONL(), len(out), bySource["rule"], bySource["llm"], bySource["unclassified"])
+		fmt.Printf("wrote %s: %d views (%d via rules, %d via llm, %d area-only from the category, %d unclassified)\n",
+			p.classifiedJSONL(), len(out), bySource["rule"], bySource["llm"], bySource["category"], bySource["unclassified"])
 		if llmDown && bySource["unclassified"] > 0 && !opts.noLLM {
 			fmt.Println("rerun \"classify\" once oMLX is up to fill the gap — verdicts are cached.")
 		}
@@ -415,8 +539,55 @@ func loadRules(path string) (*rules.Config, error) {
 	return cfg, err
 }
 
-func askLLM(client *omlx.Client, cfg *rules.Config, in rules.Input) (classify.LLMVerdict, error) {
-	system, user := classify.BuildPrompt(cfg, in)
+// subSeedsPerArea bounds the seed list per area: enough to cover what is
+// actually watched, few enough that the prompt does not grow with the corpus.
+const subSeedsPerArea = 12
+
+// collectSubSeeds counts the subs already assigned per area and returns the
+// most-used ones, most frequent first with the name as tie-break. The order
+// must be deterministic: a prompt that reshuffles between runs invites the
+// model to reshuffle its answers with it.
+//
+// Every topic passes NormalizeTopic first. The cache still holds verdicts
+// from older taxonomies, and seeding their areas would put names into the
+// prompt that the area list right above does not contain — the model then
+// reuses them one level down, which is how "dev" (an area back then) turned
+// up as a sub under music, education and science-technology alike.
+func collectSubSeeds(cfg *rules.Config, topics []string) map[string][]string {
+	counts := map[string]map[string]int{}
+	for _, t := range topics {
+		canonical, ok := cfg.NormalizeTopic(t)
+		if !ok {
+			continue
+		}
+		area, sub := rules.SplitTopic(canonical)
+		if sub == "" {
+			continue
+		}
+		if counts[area] == nil {
+			counts[area] = map[string]int{}
+		}
+		counts[area][sub]++
+	}
+	seeds := make(map[string][]string, len(counts))
+	for area, subs := range counts {
+		list := make([]string, 0, len(subs))
+		for sub := range subs {
+			list = append(list, sub)
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if subs[list[i]] != subs[list[j]] {
+				return subs[list[i]] > subs[list[j]]
+			}
+			return list[i] < list[j]
+		})
+		seeds[area] = list[:min(len(list), subSeedsPerArea)]
+	}
+	return seeds
+}
+
+func askLLM(client *omlx.Client, cfg *rules.Config, item classify.Item, seeds map[string][]string) (classify.LLMVerdict, error) {
+	system, user := classify.BuildPrompt(cfg, item, seeds)
 	reply, err := client.Chat(system, user)
 	if err != nil {
 		return classify.LLMVerdict{}, err
@@ -427,6 +598,24 @@ func askLLM(client *omlx.Client, cfg *rules.Config, in rules.Input) (classify.LL
 	}
 	v.Model = client.Model
 	return v, nil
+}
+
+// replyHead renders the start of an LLM reply on one line for a warning:
+// enough to recognize the shape of a bad answer, short enough not to spill a
+// batch of video titles into the terminal.
+func replyHead(reply string) string {
+	// Line breaks ARE the format here, so they are shown rather than
+	// collapsed: a reply that ran all verdicts together looks exactly like a
+	// well-formed one once the fields are joined, and that difference is the
+	// whole diagnosis.
+	head := strings.Join(strings.Fields(strings.ReplaceAll(reply, "\n", " ⏎ ")), " ")
+	if len(head) > 160 {
+		head = head[:160] + "…"
+	}
+	if head == "" {
+		return "(empty)"
+	}
+	return head
 }
 
 func isConnErr(err error) bool {

@@ -11,12 +11,24 @@ import (
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/rules"
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
 
+// TopicAgg is one AREA — the fixed level of the taxonomy. Subs holds the
+// free level underneath it, most-watched first; views classified as the bare
+// area (no sub) count into Views/Hours but appear in no SubAgg.
 type TopicAgg struct {
 	Topic string
 	Mode  string // dominant mode across views
+	Views int
+	Hours float64
+	Subs  []SubAgg
+}
+
+type SubAgg struct {
+	Sub   string
+	Mode  string
 	Views int
 	Hours float64
 }
@@ -52,7 +64,7 @@ type Stats struct {
 	From, To     time.Time
 	NoID         int
 	Unavailable  int
-	Sources      map[string]int // rule | llm | unclassified
+	Sources      map[string]int // rule | llm | category | unclassified
 
 	Topics   []TopicAgg
 	Months   []MonthAgg
@@ -78,9 +90,25 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 	}
 	st.HasSubs = len(subs) > 0
 
-	topicViews := map[string]int{}
-	topicHours := map[string]float64{}
-	topicModes := map[string]map[string]int{}
+	// One bucket per taxonomy level: areas roll up everything, subs keep the
+	// free level underneath their area.
+	type bucket struct {
+		views int
+		hours float64
+		modes map[string]int
+	}
+	add := func(m map[string]*bucket, key string, hours float64, mode string) {
+		b := m[key]
+		if b == nil {
+			b = &bucket{modes: map[string]int{}}
+			m[key] = b
+		}
+		b.views++
+		b.hours += hours
+		b.modes[mode]++
+	}
+	areas := map[string]*bucket{}
+	subTopics := map[string]map[string]*bucket{} // area -> sub -> bucket
 	months := map[string]*MonthAgg{}
 	type chKey struct{ name, id string }
 	channels := map[chKey]*ChannelAgg{}
@@ -106,6 +134,11 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 			st.Sources["rule"]++
 		case strings.HasPrefix(r.Source, "llm:"):
 			st.Sources["llm"]++
+		case r.Source == "category":
+			// Area from the YouTube category, sub and mode still open — a
+			// real classification as far as the area goes, so it is neither
+			// a rule hit nor unclassified.
+			st.Sources["category"]++
 		default:
 			st.Sources["unclassified"]++
 		}
@@ -122,12 +155,14 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 		if mode == "" {
 			mode = "unclear"
 		}
-		topicViews[r.Topic]++
-		topicHours[r.Topic] += hours
-		if topicModes[r.Topic] == nil {
-			topicModes[r.Topic] = map[string]int{}
+		area, sub := rules.SplitTopic(r.Topic)
+		add(areas, area, hours, mode)
+		if sub != "" {
+			if subTopics[area] == nil {
+				subTopics[area] = map[string]*bucket{}
+			}
+			add(subTopics[area], sub, hours, mode)
 		}
-		topicModes[r.Topic][mode]++
 
 		if !r.WatchedAt.IsZero() {
 			mk := r.WatchedAt.Format("2006-01")
@@ -173,15 +208,15 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 	}
 	st.UniqueVideos = len(uniq)
 
-	for topic, views := range topicViews {
-		st.Topics = append(st.Topics, TopicAgg{
-			Topic: topic,
-			Mode:  dominant(topicModes[topic]),
-			Views: views,
-			Hours: topicHours[topic],
-		})
+	for area, b := range areas {
+		agg := TopicAgg{Topic: area, Mode: dominant(b.modes), Views: b.views, Hours: b.hours}
+		for sub, sb := range subTopics[area] {
+			agg.Subs = append(agg.Subs, SubAgg{Sub: sub, Mode: dominant(sb.modes), Views: sb.views, Hours: sb.hours})
+		}
+		sortByViews(agg.Subs, func(s SubAgg) (int, string) { return s.Views, s.Sub })
+		st.Topics = append(st.Topics, agg)
 	}
-	sort.Slice(st.Topics, func(i, j int) bool { return st.Topics[i].Views > st.Topics[j].Views })
+	sortByViews(st.Topics, func(t TopicAgg) (int, string) { return t.Views, t.Topic })
 
 	for mk := range months {
 		st.Months = append(st.Months, *months[mk])
@@ -223,6 +258,19 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 		st.UnclearNames = append(st.UnclearNames, ncs[i].name)
 	}
 	return st
+}
+
+// sortByViews orders rows most-watched first with the name as tie-break, so
+// two equally watched topics do not swap places between runs.
+func sortByViews[T any](rows []T, key func(T) (int, string)) {
+	sort.Slice(rows, func(i, j int) bool {
+		vi, ni := key(rows[i])
+		vj, nj := key(rows[j])
+		if vi != vj {
+			return vi > vj
+		}
+		return ni < nj
+	})
 }
 
 func dominant(counts map[string]int) string {

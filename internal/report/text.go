@@ -14,8 +14,8 @@ func RenderText(st *Stats, showNames bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d views, %d unique videos, ≤ %.0f h (upper bound), %s … %s\n",
 		st.Views, st.UniqueVideos, st.HoursUpper, fmtDate(st.From), fmtDate(st.To))
-	fmt.Fprintf(&b, "classified: %d via rules, %d via llm, %d open\n\n",
-		st.Sources["rule"], st.Sources["llm"], st.Sources["unclassified"])
+	fmt.Fprintf(&b, "classified: %d via rules, %d via llm, %d area-only from the youtube category, %d open\n\n",
+		st.Sources["rule"], st.Sources["llm"], st.Sources["category"], st.Sources["unclassified"])
 
 	maxViews := 1
 	if len(st.Topics) > 0 {
@@ -29,6 +29,9 @@ func RenderText(st *Stats, showNames bool) string {
 		}
 		bar := strings.Repeat("█", 1+t.Views*24/maxViews)
 		fmt.Fprintf(&b, "  %-18s %-8s %5d views  ≤%7.1f h  %s\n", t.Topic, t.Mode, t.Views, t.Hours, bar)
+		if line := subLine(t.Subs, 6); line != "" {
+			fmt.Fprintf(&b, "  %-18s %s\n", "", line)
+		}
 	}
 
 	modeViews := map[string]int{}
@@ -62,6 +65,23 @@ func RenderText(st *Stats, showNames bool) string {
 			strings.Join(st.UnclearNames[:min(5, len(st.UnclearNames))], ", "))
 	}
 	return b.String()
+}
+
+// subLine renders an area's free second level as one compact row; subs are
+// slugs, never channel names, so it stays safe under -no-names.
+func subLine(subs []SubAgg, limit int) string {
+	if len(subs) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, limit+1)
+	for i, s := range subs {
+		if i >= limit {
+			parts = append(parts, fmt.Sprintf("+%d more", len(subs)-i))
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", s.Sub, s.Views))
+	}
+	return strings.Join(parts, " · ")
 }
 
 func fmtDate(t interface{ Format(string) string }) string { return t.Format("2006-01-02") }

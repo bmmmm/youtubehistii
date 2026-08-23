@@ -41,8 +41,18 @@ func TestAggregate(t *testing.T) {
 	if st.HoursUpper != 2.5 {
 		t.Errorf("hours=%v want 2.5", st.HoursUpper)
 	}
-	if st.Topics[0].Topic != "gaming/rust" || st.Topics[0].Views != 2 || st.Topics[0].Mode != "consume" {
+	// Topics aggregate on the AREA; the sub is the level underneath it.
+	if st.Topics[0].Topic != "gaming" || st.Topics[0].Views != 2 || st.Topics[0].Mode != "consume" {
 		t.Errorf("top topic = %+v", st.Topics[0])
+	}
+	if len(st.Topics[0].Subs) != 1 || st.Topics[0].Subs[0].Sub != "rust" || st.Topics[0].Subs[0].Views != 2 {
+		t.Errorf("top topic subs = %+v", st.Topics[0].Subs)
+	}
+	// "unclear" carries no sub, and a bare area must not invent one.
+	for _, tp := range st.Topics {
+		if tp.Topic == "unclear" && len(tp.Subs) != 0 {
+			t.Errorf("unclear must have no subs, got %+v", tp.Subs)
+		}
 	}
 	if st.Sources["rule"] != 2 || st.Sources["llm"] != 1 || st.Sources["unclassified"] != 1 {
 		t.Errorf("sources = %v", st.Sources)
@@ -74,7 +84,7 @@ func TestRenderHTML(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"gaming/rust", "media.ccc.de", "never watched", "upper bound", "Mystery"} {
+	for _, want := range []string{"gaming", "rust 2", "media.ccc.de", "never watched", "upper bound", "Mystery"} {
 		if !bytes.Contains(html, []byte(want)) {
 			t.Errorf("html misses %q", want)
 		}
@@ -98,12 +108,20 @@ func TestWriteCSV(t *testing.T) {
 	if !strings.Contains(lines[3], ",true,") {
 		t.Errorf("subscribed view not flagged: %s", lines[3])
 	}
+	// The full topic and its area both ship, so a pivot can group on either.
+	if !strings.Contains(lines[0], "topic,area,") {
+		t.Errorf("header misses the area column: %s", lines[0])
+	}
+	if !strings.Contains(lines[3], "dev/talks,dev,") {
+		t.Errorf("row misses topic+area: %s", lines[3])
+	}
 }
 
 func TestRenderText(t *testing.T) {
 	rows, subs := sampleData()
 	txt := RenderText(Aggregate(rows, subs), true)
-	for _, want := range []string{"gaming/rust", "subscriptions: 2 total, 1 never watched", "Mystery"} {
+	// The area row plus its sub line — both levels are visible.
+	for _, want := range []string{"gaming ", "rust 2", "subscriptions: 2 total, 1 never watched", "Mystery"} {
 		if !strings.Contains(txt, want) {
 			t.Errorf("text misses %q in:\n%s", want, txt)
 		}
