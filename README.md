@@ -121,8 +121,8 @@ same source:
 
 That leaves the LLM exactly the two questions no metadata answers: which
 specific subject, and consume vs. learn. It picks an area only for videos that
-have no category at all — deleted or age-restricted ones, and anything `enrich`
-has not reached yet.
+have no category at all — deleted, age-restricted or members-only ones, and
+anything `enrich` has not reached yet.
 
 Two of YouTube's categories, **Entertainment** and **People & Blogs**, are
 catch-alls: uploaders pick them when nothing fits, so they hold anything. They
