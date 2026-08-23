@@ -191,7 +191,15 @@ var errLineRe = regexp.MustCompile(`ERROR: \[[^\]]+\] ([A-Za-z0-9_-]{6,20}): (.*
 // age-verification wall (permanent without --cookies), never the separate
 // "confirm you're not a bot" message, which signals IP-level rate limiting
 // and is transient (retry later, don't tombstone).
-var goneMarkers = []string{"unavailable", "private", "removed", "terminated", "not available", "confirm your age"}
+// "members" catches the members-only wall ("available to this channel's
+// members on level: ...", "Join this channel to get access to members-only
+// content"). Like age restriction it is permanent for anyone without the
+// credential, and it used to be misfiled as transient — so every run retried
+// the same paywalled videos forever, at full request cost.
+var goneMarkers = []string{
+	"unavailable", "private", "removed", "terminated", "not available",
+	"confirm your age", "members",
+}
 
 // rateLimitMarkers mean YouTube is throttling this IP or account — nothing is
 // wrong with the video, we are simply going too fast. Matched on "not a bot"
@@ -272,11 +280,15 @@ type FetchOpts struct {
 	// Sleep is passed to --sleep-requests: seconds between HTTP requests.
 	Sleep float64
 	// Client pins youtube:player_client. Empty means yt-dlp's own default,
-	// which queries TWO clients (android_vr + web_safari) and therefore pays
-	// roughly one extra sleeping request per video. Pinning a single client
-	// returns the same fields we keep — measured at ~23 % less wall clock —
-	// but a handful of videos only come back from the other client, which is
-	// what the caller's fallback pass is for.
+	// which queries TWO clients (android_vr + web_safari).
+	//
+	// Measured on a 20-video chunk, the pin does NOT buy wall clock: 65.0 s
+	// versus 65.8 s, because the run is bound by --sleep-requests and network
+	// latency, not by client count. What it does buy is CPU — 3.65 s versus
+	// 6.02 s, roughly half — which is headroom for running more workers. A
+	// three-video probe suggested a much larger win; that was process startup
+	// and the one-off player-JS fetch, not a per-video saving. Kept for the
+	// CPU, not sold as throughput.
 	Client string
 	// Cookies is passed to --cookies-from-browser. Empty means no cookies.
 	Cookies string

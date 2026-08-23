@@ -284,6 +284,20 @@ ERROR: [youtube] bot00000002: Sign in to confirm you're not a bot`
 	}
 }
 
+// TestClassifyErrorsMembersOnlyIsGone: verbatim yt-dlp output for a
+// members-only video. Before this was a gone marker it counted as transient,
+// so every run paid the full request cost to fail on it again.
+func TestClassifyErrorsMembersOnlyIsGone(t *testing.T) {
+	stderr := `ERROR: [youtube] mem00000001: This video is available to this channel's members on level: LTT Members Plus (or any higher level). Join this channel to get access to members-only content and other exclusive perks.`
+	gone, failed := ClassifyErrors(stderr, []string{"mem00000001"})
+	if len(gone) != 1 || gone[0] != "mem00000001" {
+		t.Errorf("gone = %v, want the members-only video tombstoned", gone)
+	}
+	if len(failed) != 0 {
+		t.Errorf("failed = %v, want none", failed)
+	}
+}
+
 func TestCacheRoundtrip(t *testing.T) {
 	c := Cache{Dir: t.TempDir()}
 	if c.Has("abc123DEF45") {

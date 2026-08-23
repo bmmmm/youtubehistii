@@ -27,7 +27,11 @@ func addEnrichFlags(fs *flag.FlagSet) enrichFlags {
 		limit:   fs.Int("limit", 0, "fetch at most N videos this run (0 = all missing)"),
 		chunk:   fs.Int("chunk", 100, "videos per yt-dlp invocation"),
 		workers: fs.Int("workers", 3, "parallel yt-dlp processes (keep low — YouTube rate limits by IP)"),
-		sleep:   fs.Float64("sleep", 1.0, "seconds yt-dlp sleeps between requests, per worker (effective rate ≈ workers/sleep)"),
+		// Measured on a 60-video sample: at 1.0 about two thirds of the run
+		// is pure waiting (~2.1 sleeping requests per video). 0.25 halved the
+		// wall clock with byte-identical metadata and no bot check, and the
+		// rate-limit backoff below is what makes it safe to start there.
+		sleep: fs.Float64("sleep", 0.25, "seconds yt-dlp sleeps between requests, per worker (raised automatically when YouTube pushes back)"),
 		cookies: fs.String("cookies-from-browser", "auto",
 			`browser to take YouTube cookies from ("auto" picks the first installed, "" fetches anonymously)`),
 	}
@@ -168,12 +172,16 @@ func (s *runState) dropCookies() (first bool) {
 	return first
 }
 
-// fetchOne runs the fast single-client pass and, only for what it could not
-// resolve, a second pass on yt-dlp's default clients. The fast client covers
-// the normal case at ~23 % less wall clock; the fallback keeps the coverage
-// of the two-client default for the handful of videos that need it, and
-// doubles as an in-run retry for transient failures that would otherwise cost
-// the user a whole rerun.
+// fetchOne runs the single-client pass and, only for what it could not
+// resolve, a second pass on yt-dlp's default clients. The fallback keeps the
+// coverage of the two-client default for the videos that need it, and doubles
+// as an in-run retry for transient failures that would otherwise cost the
+// user a whole rerun.
+//
+// Its cost is bounded by the transient-failure rate, which is why correct
+// classification matters so much: while members-only videos were misfiled as
+// transient, this pass retried a permanent paywall on every chunk and made
+// the run measurably SLOWER than no fallback at all.
 func fetchOne(fetch fetchFunc, ids []string, sleep float64, st *runState) (enrich.ChunkResult, error) {
 	backoff, cookies := st.snapshot()
 	sleep *= float64(int(1) << backoff)
