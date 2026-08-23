@@ -73,6 +73,27 @@ func TestParseChannel(t *testing.T) {
 	}
 }
 
+func TestChannelKey(t *testing.T) {
+	cases := []struct {
+		name string
+		view View
+		want string
+	}{
+		{"the id wins where the export has one",
+			View{Channel: "Rust Lets Play Guy", ChannelURL: "https://www.youtube.com/channel/UCabc"}, "UCabc"},
+		{"the name carries a handle-only or renamed channel",
+			View{Channel: "Rust Lets Play Guy"}, "rust lets play guy"},
+		{"a handle URL is not an id",
+			View{Channel: "Guy", ChannelURL: "https://www.youtube.com/@guy"}, "guy"},
+		{"nothing to group by", View{}, ""},
+	}
+	for _, c := range cases {
+		if got := c.view.ChannelKey(); got != c.want {
+			t.Errorf("%s: ChannelKey() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 func TestVideoID(t *testing.T) {
 	cases := map[string]string{
 		"https://www.youtube.com/watch?v=abc123DEF45":       "abc123DEF45",

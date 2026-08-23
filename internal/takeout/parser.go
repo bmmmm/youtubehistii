@@ -40,6 +40,21 @@ type View struct {
 	WatchedAt  time.Time `json:"watchedAt"`
 }
 
+// ChannelKey identifies the channel a view belongs to, for grouping videos
+// across the metadata cache. The UC… id where the export carries one, the
+// lowercased channel name otherwise, "" when neither is there.
+//
+// Takeout is the single source on purpose. It is the only one that covers
+// tombstoned videos — those cache entries hold nothing but {ID, Unavailable} —
+// and mixing in enrich.Meta.ChannelID would mean two axes to reconcile for a
+// grouping that has to hold for videos with and without metadata alike.
+func (v View) ChannelKey() string {
+	if id := ChannelIDFromURL(v.ChannelURL); id != "" {
+		return id
+	}
+	return strings.ToLower(strings.TrimSpace(v.Channel))
+}
+
 // Stats counts what happened during parsing, so nothing disappears silently.
 type Stats struct {
 	Total   int // entries in the export

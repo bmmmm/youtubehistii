@@ -17,6 +17,7 @@ func cmdInspect(args []string) error {
 	fs, dataDir := newFlagSet("inspect")
 	tagsPerCategory := fs.Int("tags-per-category", 15, "creator tags to list per category")
 	showTags := fs.Bool("tags", false, "list creator tags (they often contain channel and personal names)")
+	showChannels := fs.Bool("channels", false, "count what the channel axis answers: inheritable categories, subject vs. brand tags")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -28,6 +29,6 @@ func cmdInspect(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Print(inspect.Render(inspect.Aggregate(views, metas, *tagsPerCategory), *showTags))
+	fmt.Print(inspect.Render(inspect.Aggregate(views, metas, *tagsPerCategory), *showTags, *showChannels))
 	return nil
 }
