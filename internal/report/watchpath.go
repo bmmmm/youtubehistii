@@ -79,6 +79,46 @@ type Path struct {
 	Views    int // views placed on the timeline
 	Dropped  int // views without a timestamp — no place on a time axis
 	From, To time.Time
+
+	Days  []DayAgg     // OLDEST first — calendar order
+	Trans []Transition // by N desc, then From, then To — deterministic
+	Stats PathStats
+}
+
+// DayAgg is one calendar day of the path: the sittings that started on it.
+//
+// A sitting that runs past midnight counts entirely on the day it began. The
+// sitting is the unit everything else is built on, and cutting one in half at
+// 00:00 would put a single evening on two rows of the heatmap.
+type DayAgg struct {
+	Date     string  // "2006-01-02", local date of the session starts
+	EpochDay int     // days since 1970-01-01 — the heatmap grid coordinate
+	Views    int     // views of all sessions that started this day
+	Hours    float64 // upper bound, sum of full video lengths
+	Area     string  // dominant MAIN-LANE area; ties broken by name (dominant())
+	SessFrom int     // inclusive index range into Path.Sessions (newest first),
+	SessTo   int     // so Sessions[SessFrom] is the NEWEST sitting of that day
+}
+
+// Transition counts one area following another on the main lane, inside one
+// sitting. Self-loops are kept: they are a chain staying on one topic.
+type Transition struct {
+	From, To string
+	N        int
+}
+
+// PathStats are the headline numbers of the overview.
+type PathStats struct {
+	Views, Sessions, Dropped  int
+	OverlapViews, RabbitViews int
+	HoursUpper                float64
+	LongestSession            int // index into Sessions, -1 when there is none
+	LongestSessionViews       int
+	LongestSessionSpan        time.Duration
+	DeepestRabbit             int // index into Sessions holding the longest chain, -1
+	DeepestRabbitLen          int // that chain's length in views
+	BusiestDay                int // index into Days, -1 when there is none
+	BusiestDayViews           int
 }
 
 // BuildPath derives sessions, edges, overlap suspicion and rabbit holes from
@@ -104,10 +144,19 @@ func BuildPath(rows []classify.Verdict) *Path {
 		views = append(views, PathView{
 			Title: r.Title, Channel: r.Channel,
 			Area: area, Sub: sub, Mode: mode,
-			WatchedAt: r.WatchedAt, DurationS: r.DurationS,
+			// Takeout serialises every timestamp as UTC, but a watch path is
+			// read in wall-clock time: a video started at 01:20 belongs to
+			// that night, not to the previous UTC day. Converting once here
+			// is what makes the calendar day, the session clock and the hour
+			// axis on the page all mean the same thing — the page renders in
+			// the reader's local time, and this is the only place Go has to
+			// agree with it. The instant is untouched, so every gap, every
+			// session cut and every t0-relative offset stays as it was.
+			WatchedAt: r.WatchedAt.Local(), DurationS: r.DurationS,
 		})
 	}
 	if len(views) == 0 {
+		p.Stats = buildStats(p) // an empty path still owes the page its -1 indices
 		return p
 	}
 	sort.Slice(views, func(i, j int) bool { return views[i].WatchedAt.Before(views[j].WatchedAt) })
@@ -149,6 +198,9 @@ func BuildPath(rows []classify.Verdict) *Path {
 		}
 	}
 	p.Sessions = sessions
+	p.Days = buildDays(sessions)
+	p.Trans = buildTransitions(sessions)
+	p.Stats = buildStats(p)
 	return p
 }
 
@@ -217,4 +269,122 @@ func markRabbitHoles(vs []PathView) {
 		}
 		runStart = k
 	}
+}
+
+// buildDays folds the sittings into calendar days, oldest first. Sessions
+// arrive newest first and are chronologically ordered, so every day owns one
+// contiguous run of them and a single backwards pass finds it.
+func buildDays(sessions []Session) []DayAgg {
+	var days []DayAgg
+	var mainAreas []map[string]int
+	for i := len(sessions) - 1; i >= 0; i-- {
+		s := sessions[i]
+		date := s.Start.Format("2006-01-02")
+		if len(days) == 0 || days[len(days)-1].Date != date {
+			y, m, d := s.Start.Date()
+			days = append(days, DayAgg{
+				Date:     date,
+				EpochDay: int(time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix() / 86400),
+				SessTo:   i, // the oldest sitting of the day, reached first
+			})
+			mainAreas = append(mainAreas, map[string]int{})
+		}
+		day, counts := &days[len(days)-1], mainAreas[len(mainAreas)-1]
+		day.SessFrom = i // slides on towards the day's newest sitting
+		day.Views += len(s.Views)
+		for _, v := range s.Views {
+			day.Hours += float64(v.DurationS) / 3600
+			if !v.Overlap {
+				counts[v.Area]++ // background must not decide what a day was about
+			}
+		}
+	}
+	for i := range days {
+		days[i].Area = dominant(mainAreas[i])
+	}
+	return days
+}
+
+// buildTransitions counts what followed what on the main lane. A jump over a
+// night is not a transition, so the walk never leaves a sitting; overlap views
+// are skipped rather than breaking the chain, the same treatment they get in
+// markRabbitHoles.
+func buildTransitions(sessions []Session) []Transition {
+	counts := map[[2]string]int{}
+	for _, s := range sessions {
+		prev, have := "", false
+		// Views are stored newest first; "followed by" is a statement about
+		// the order they were watched in.
+		for i := len(s.Views) - 1; i >= 0; i-- {
+			v := s.Views[i]
+			if v.Overlap {
+				continue
+			}
+			if have {
+				counts[[2]string{prev, v.Area}]++
+			}
+			prev, have = v.Area, true
+		}
+	}
+	out := make([]Transition, 0, len(counts))
+	for k, n := range counts {
+		out = append(out, Transition{From: k[0], To: k[1], N: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].N != out[j].N {
+			return out[i].N > out[j].N
+		}
+		if out[i].From != out[j].From {
+			return out[i].From < out[j].From
+		}
+		return out[i].To < out[j].To
+	})
+	return out
+}
+
+// buildStats reduces the path to its headline numbers. It needs Days already
+// filled, because BusiestDay indexes them.
+//
+// All three superlatives rank by VIEWS. For the sitting that is a decision:
+// its span is the distance between the first and the last START, not watch
+// time, so two videos half an hour apart would otherwise outrank an hour of
+// clicking. The span is reported alongside, never used to rank.
+func buildStats(p *Path) PathStats {
+	st := PathStats{
+		Views: p.Views, Sessions: len(p.Sessions), Dropped: p.Dropped,
+		LongestSession: -1, DeepestRabbit: -1, BusiestDay: -1,
+	}
+	for si, s := range p.Sessions {
+		run := 0
+		for _, v := range s.Views {
+			st.HoursUpper += float64(v.DurationS) / 3600
+			if v.Overlap {
+				st.OverlapViews++
+				continue // set aside, so it neither counts nor cuts a chain
+			}
+			if !v.Rabbit {
+				run = 0
+				continue
+			}
+			st.RabbitViews++
+			run++
+			if run > st.DeepestRabbitLen {
+				st.DeepestRabbitLen, st.DeepestRabbit = run, si
+			}
+		}
+		// Strict >, so a tie keeps the newer sitting — Sessions is newest
+		// first, and the reader means the recent one.
+		if n := len(s.Views); n > st.LongestSessionViews {
+			st.LongestSessionViews, st.LongestSession = n, si
+			st.LongestSessionSpan = s.End.Sub(s.Start)
+		}
+	}
+	// Days run oldest first, so >= is what keeps the newer day on a tie —
+	// same rule as above, stated the other way round.
+	for di, d := range p.Days {
+		if d.Views >= st.BusiestDayViews {
+			st.BusiestDayViews, st.BusiestDay = d.Views, di
+		}
+	}
+	return st
 }

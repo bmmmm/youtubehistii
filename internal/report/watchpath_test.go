@@ -5,6 +5,8 @@ package report
 import (
 	"bytes"
 	"encoding/json"
+	"math"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +14,11 @@ import (
 	"github.com/bmmmm/youtubehistii/internal/classify"
 )
 
-var pathT0 = time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+// pathT0 is local on purpose. BuildPath reads every timestamp in wall-clock
+// time, so a fixture written in UTC would assert a different calendar day on
+// every machine. July has no daylight-saving transition anywhere, which is
+// what keeps the offsets below plain wall-clock arithmetic.
+var pathT0 = time.Date(2026, 7, 1, 12, 0, 0, 0, time.Local)
 
 // view builds one classified row at t0 + offset, so a test reads as a
 // timeline rather than as a list of timestamps.
@@ -37,6 +43,32 @@ func flat(p *Path) []PathView {
 	}
 	return out
 }
+
+// pathFixture is a hand-countable path: two sittings on 2026-07-01 (the
+// second holding a four-video chain), one on 2026-07-03 with music running
+// through a documentary, and one row the export never dated.
+func pathFixture() []classify.Verdict {
+	return []classify.Verdict{
+		view(0, "music", 300),
+		view(5*time.Minute, "music", 300),
+
+		view(60*time.Minute, "sports", 300),
+		view(66*time.Minute, "sports", 300),
+		view(72*time.Minute, "sports", 300),
+		view(78*time.Minute, "sports", 300),
+		view(84*time.Minute, "music", 300),
+
+		view(48*time.Hour, "film-animation", 45*60),
+		view(48*time.Hour+5*time.Minute, "music", 200),
+		view(48*time.Hour+10*time.Minute, "film-animation", 45*60),
+
+		{VideoID: "undated", Title: "undated", Topic: "music"},
+	}
+}
+
+// hoursEqual compares watch-hour sums. They are accumulated per view, so they
+// only ever match a closed-form expectation to within a rounding step.
+func hoursEqual(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
 func TestSessionSplitAtTheThreshold(t *testing.T) {
 	// 29 minutes holds a sitting together, 31 breaks it — the boundary itself
@@ -269,9 +301,38 @@ func TestRenderWatchPathIsSelfContained(t *testing.T) {
 		}
 	}
 	// No external asset may sneak in — the page has to work offline forever.
-	for _, bad := range []string{"http://", "https://", "<link", "src="} {
-		if strings.Contains(page, bad) {
+	//
+	// The check runs on the page WITHOUT its data payload: a video title may
+	// legitimately contain a URL, and a title is data, not a reference. What
+	// the guard is really about is whether the page can be made to LOAD
+	// something, so it names the constructs that load rather than banning the
+	// substring "http".
+	shell := strings.Replace(page, string(mustPayload(t, html)), "", 1)
+	for _, bad := range []string{"<link", "<iframe", "<img", "src=", "@import",
+		`href="http`, "href='http", "fetch(", "XMLHttpRequest", "importScripts"} {
+		if strings.Contains(shell, bad) {
 			t.Errorf("page reaches outside via %q", bad)
+		}
+	}
+	// A url() is allowed only where it points back into this page — that is how
+	// an SVG marker is referenced. Anything else would be a fetch.
+	for i := 0; ; {
+		j := strings.Index(shell[i:], "url(")
+		if j < 0 {
+			break
+		}
+		i += j + len("url(")
+		if !strings.HasPrefix(shell[i:], "#") {
+			t.Errorf("url() does not point at a fragment of this page: %.40q", shell[i-4:])
+		}
+	}
+	// After that, the only URL left in the shell is the SVG namespace, which
+	// createElementNS needs as an identifier and never fetches. Naming the one
+	// exception keeps the guard exact instead of blunt.
+	rest := strings.ReplaceAll(shell, "http://www.w3.org/2000/svg", "")
+	for _, scheme := range []string{"http://", "https://", "//fonts."} {
+		if strings.Contains(rest, scheme) {
+			t.Errorf("page carries a URL (%q) beyond the SVG namespace", scheme)
 		}
 	}
 }
@@ -343,5 +404,378 @@ func TestPathDataInternsRepeats(t *testing.T) {
 	// A stable hue per name is what keeps colours from moving between runs.
 	if areaHue("music") != areaHue("music") || areaHue("music") == areaHue("sports") {
 		t.Error("area hues must be stable per name and differ between names")
+	}
+}
+
+func TestDayOwnsTheSittingThatStartedOnIt(t *testing.T) {
+	// 23:30 → 00:10. The sitting is the unit, so it stays whole on the day it
+	// began instead of being cut in two at midnight.
+	p := BuildPath([]classify.Verdict{
+		view(11*time.Hour+30*time.Minute, "music", 300),
+		view(11*time.Hour+50*time.Minute, "music", 300),
+		view(12*time.Hour+10*time.Minute, "music", 600),
+	})
+	if len(p.Sessions) != 1 {
+		t.Fatalf("20 minutes apart is one sitting, got %d", len(p.Sessions))
+	}
+	if len(p.Days) != 1 {
+		t.Fatalf("days = %d, want 1 — the night does not open a new one", len(p.Days))
+	}
+	d := p.Days[0]
+	if d.Date != "2026-07-01" {
+		t.Errorf("date = %q, want the day the sitting started", d.Date)
+	}
+	if d.Views != 3 {
+		t.Errorf("views = %d, want all 3 on the start day", d.Views)
+	}
+	if want := 1200.0 / 3600; !hoursEqual(d.Hours, want) {
+		t.Errorf("hours = %v, want %v", d.Hours, want)
+	}
+	if d.EpochDay != 20635 { // 2026-07-01, cross-checked against date(1)
+		t.Errorf("epoch day = %d, want 20635", d.EpochDay)
+	}
+}
+
+func TestDaysAreCalendarOrderedAndMeasureTheirGaps(t *testing.T) {
+	// The heatmap draws empty cells from the distance between EpochDays, so
+	// that distance has to be the calendar one and not the index one.
+	p := BuildPath([]classify.Verdict{
+		view(0, "music", 300),
+		view(24*time.Hour, "sports", 300),
+		view(5*24*time.Hour, "gaming", 300),
+	})
+	if len(p.Days) != 3 {
+		t.Fatalf("days = %d, want 3", len(p.Days))
+	}
+	for i, want := range []string{"2026-07-01", "2026-07-02", "2026-07-06"} {
+		if p.Days[i].Date != want {
+			t.Errorf("day %d = %q, want %q (oldest first)", i, p.Days[i].Date, want)
+		}
+	}
+	if got := p.Days[1].EpochDay - p.Days[0].EpochDay; got != 1 {
+		t.Errorf("consecutive days are %d apart, want 1", got)
+	}
+	if got := p.Days[2].EpochDay - p.Days[1].EpochDay; got != 4 {
+		t.Errorf("a four-day hole measured %d, want 4", got)
+	}
+}
+
+func TestDaySessionRangePointsAtItsSittings(t *testing.T) {
+	// Sessions run newest first, days oldest first: SessFrom is the day's
+	// NEWEST sitting and SessTo its oldest, and the ranges together have to
+	// account for every sitting exactly once.
+	p := BuildPath(pathFixture())
+	if len(p.Sessions) != 3 || len(p.Days) != 2 {
+		t.Fatalf("fixture drifted: %d sittings, %d days", len(p.Sessions), len(p.Days))
+	}
+	if p.Days[0].SessFrom != 1 || p.Days[0].SessTo != 2 {
+		t.Errorf("2026-07-01 owns sittings %d…%d, want 1…2", p.Days[0].SessFrom, p.Days[0].SessTo)
+	}
+	if p.Days[1].SessFrom != 0 || p.Days[1].SessTo != 0 {
+		t.Errorf("2026-07-03 owns sittings %d…%d, want 0…0", p.Days[1].SessFrom, p.Days[1].SessTo)
+	}
+	seen := 0
+	for _, d := range p.Days {
+		views := 0
+		for si := d.SessFrom; si <= d.SessTo; si++ {
+			if got := p.Sessions[si].Start.Format("2006-01-02"); got != d.Date {
+				t.Errorf("sitting %d starts on %s but sits in day %s", si, got, d.Date)
+			}
+			views += len(p.Sessions[si].Views)
+			seen++
+		}
+		if views != d.Views {
+			t.Errorf("day %s counts %d views, its sittings hold %d", d.Date, d.Views, views)
+		}
+	}
+	if seen != len(p.Sessions) {
+		t.Errorf("the day ranges cover %d sittings, want %d", seen, len(p.Sessions))
+	}
+}
+
+func TestDayAreaBreaksTiesByName(t *testing.T) {
+	// Two views each. dominant() settles it by name, so a run of the tool
+	// twice on the same export cannot produce two different days.
+	p := BuildPath([]classify.Verdict{
+		view(0, "music", 300),
+		view(5*time.Minute, "gaming", 300),
+		view(10*time.Minute, "music", 300),
+		view(15*time.Minute, "gaming", 300),
+	})
+	if p.Days[0].Area != "gaming" {
+		t.Errorf("area = %q, want the alphabetically first of the tied pair", p.Days[0].Area)
+	}
+}
+
+func TestDayAreaIgnoresOverlapViews(t *testing.T) {
+	// Four music entries inside one 45-minute documentary: the background is
+	// in the majority and must still not decide what the day was about.
+	p := BuildPath([]classify.Verdict{
+		view(0, "film-animation", 45*60),
+		view(2*time.Minute, "music", 200),
+		view(4*time.Minute, "music", 200),
+		view(6*time.Minute, "music", 200),
+		view(8*time.Minute, "music", 200),
+	})
+	overlaps := 0
+	for _, v := range flat(p) {
+		if v.Overlap {
+			overlaps++
+		}
+	}
+	if overlaps != 4 {
+		t.Fatalf("fixture drifted: %d overlap views, want 4 against 1 on the main lane", overlaps)
+	}
+	if p.Days[0].Views != 5 {
+		t.Errorf("views = %d, want 5 — the day still counts the background", p.Days[0].Views)
+	}
+	if p.Days[0].Area != "film-animation" {
+		t.Errorf("area = %q, want the main lane to win", p.Days[0].Area)
+	}
+}
+
+func TestTransitionsStayInsideOneSitting(t *testing.T) {
+	// A jump over a night is not a statement about what followed what.
+	p := BuildPath([]classify.Verdict{
+		view(0, "music", 300),
+		view(10*time.Minute, "sports", 300),
+		view(100*time.Minute, "gaming", 300),
+	})
+	if len(p.Sessions) != 2 {
+		t.Fatalf("fixture drifted: %d sittings, want 2", len(p.Sessions))
+	}
+	want := []Transition{{From: "music", To: "sports", N: 1}}
+	if !reflect.DeepEqual(p.Trans, want) {
+		t.Errorf("transitions = %v, want %v", p.Trans, want)
+	}
+}
+
+func TestTransitionsSkipOverlapAndKeepSelfLoops(t *testing.T) {
+	// Music inside the documentary is stepped over, not counted and not
+	// treated as a break — the same rule the rabbit holes use. What is left
+	// is a chain staying on one topic, and that self-loop is worth counting.
+	p := BuildPath([]classify.Verdict{
+		view(0, "film-animation", 45*60),
+		view(2*time.Minute, "music", 200),
+		view(10*time.Minute, "film-animation", 45*60),
+	})
+	if vs := flat(p); !vs[1].Overlap {
+		t.Fatalf("fixture drifted: the music view is not an overlap")
+	}
+	want := []Transition{{From: "film-animation", To: "film-animation", N: 1}}
+	if !reflect.DeepEqual(p.Trans, want) {
+		t.Errorf("transitions = %v, want %v", p.Trans, want)
+	}
+}
+
+func TestTransitionOrderIsDeterministic(t *testing.T) {
+	// Counts first, then the names — otherwise the list would follow Go's map
+	// order and change between runs on the same data.
+	seq := []string{"music", "sports", "music", "sports", "gaming", "music", "gaming", "music"}
+	rows := make([]classify.Verdict, 0, len(seq))
+	for i, a := range seq {
+		rows = append(rows, view(time.Duration(i)*5*time.Minute, a, 300))
+	}
+	p := BuildPath(rows)
+	if len(p.Sessions) != 1 {
+		t.Fatalf("fixture drifted: %d sittings, want 1", len(p.Sessions))
+	}
+	want := []Transition{
+		{From: "gaming", To: "music", N: 2},
+		{From: "music", To: "sports", N: 2},
+		{From: "music", To: "gaming", N: 1},
+		{From: "sports", To: "gaming", N: 1},
+		{From: "sports", To: "music", N: 1},
+	}
+	if !reflect.DeepEqual(p.Trans, want) {
+		t.Errorf("transitions = %v,\nwant %v", p.Trans, want)
+	}
+}
+
+func TestPathStatsOnAKnownFixture(t *testing.T) {
+	p := BuildPath(pathFixture())
+	st := p.Stats
+	want := PathStats{
+		Views: 10, Sessions: 3, Dropped: 1,
+		OverlapViews: 1, RabbitViews: 4,
+		LongestSession: 1, LongestSessionViews: 5, LongestSessionSpan: 24 * time.Minute,
+		DeepestRabbit: 1, DeepestRabbitLen: 4,
+		BusiestDay: 0, BusiestDayViews: 7,
+	}
+	want.HoursUpper = st.HoursUpper // compared separately, it is a float sum
+	if st != want {
+		t.Errorf("stats = %+v,\nwant %+v", st, want)
+	}
+	if h := 7700.0 / 3600; !hoursEqual(st.HoursUpper, h) {
+		t.Errorf("hours = %v, want %v", st.HoursUpper, h)
+	}
+	// The indices have to land on the sittings and days they name.
+	if got := len(p.Sessions[st.LongestSession].Views); got != st.LongestSessionViews {
+		t.Errorf("longest sitting holds %d views, stats say %d", got, st.LongestSessionViews)
+	}
+	if got := p.Days[st.BusiestDay].Views; got != st.BusiestDayViews {
+		t.Errorf("busiest day holds %d views, stats say %d", got, st.BusiestDayViews)
+	}
+	if p.Days[st.BusiestDay].Date != "2026-07-01" {
+		t.Errorf("busiest day = %q, want 2026-07-01", p.Days[st.BusiestDay].Date)
+	}
+	rabbits := 0
+	for _, v := range p.Sessions[st.DeepestRabbit].Views {
+		if v.Rabbit {
+			rabbits++
+		}
+	}
+	if rabbits != st.DeepestRabbitLen {
+		t.Errorf("deepest sitting holds %d chain views, stats say %d", rabbits, st.DeepestRabbitLen)
+	}
+}
+
+func TestEmptyPathHasNoIndices(t *testing.T) {
+	// The page reads the headline numbers unconditionally, so an empty export
+	// has to answer "there is none" rather than point at row 0.
+	for name, p := range map[string]*Path{
+		"no rows at all": BuildPath(nil),
+		"only undated":   BuildPath([]classify.Verdict{{VideoID: "x", Title: "x", Topic: "music"}}),
+	} {
+		if len(p.Days) != 0 || len(p.Trans) != 0 {
+			t.Errorf("%s: days = %v, trans = %v", name, p.Days, p.Trans)
+		}
+		st := p.Stats
+		if st.LongestSession != -1 || st.DeepestRabbit != -1 || st.BusiestDay != -1 {
+			t.Errorf("%s: indices = %d/%d/%d, want -1", name,
+				st.LongestSession, st.DeepestRabbit, st.BusiestDay)
+		}
+		if st.Views != 0 || st.Sessions != 0 || st.HoursUpper != 0 || st.BusiestDayViews != 0 {
+			t.Errorf("%s: stats = %+v", name, st)
+		}
+		d := buildPathData(p)
+		if d.Stats == nil || d.Stats.BusiestDay != -1 {
+			t.Errorf("%s: payload stats = %+v", name, d.Stats)
+		}
+		if len(d.Sess) != 0 || len(d.Days) != 0 || len(d.Trans) != 0 || len(d.AreaViews) != 0 {
+			t.Errorf("%s: payload is not empty", name)
+		}
+	}
+	if got := BuildPath([]classify.Verdict{{VideoID: "x", Title: "x", Topic: "music"}}).Stats.Dropped; got != 1 {
+		t.Errorf("an undated row still counts as dropped, got %d", got)
+	}
+}
+
+func TestPathDataSessionsPointAtTheirRows(t *testing.T) {
+	// The whole page rests on this: sess[i] names a row index, and the nViews
+	// rows behind it are that sitting's views, in the same order. Nothing is
+	// copied, so if this drifts every other view shows the wrong videos.
+	p := BuildPath(pathFixture())
+	d := buildPathData(p)
+	if len(d.Sess) != len(p.Sessions) {
+		t.Fatalf("sess = %d entries, sessions = %d", len(d.Sess), len(p.Sessions))
+	}
+	for i, s := range d.Sess {
+		rowIdx, nViews := s[0].(int), s[3].(int)
+		if d.Rows[rowIdx][0] != rowSession {
+			t.Fatalf("sess[%d] rowIdx %d is not a session row", i, rowIdx)
+		}
+		if nViews != len(p.Sessions[i].Views) {
+			t.Fatalf("sess[%d] claims %d views, the sitting has %d", i, nViews, len(p.Sessions[i].Views))
+		}
+		if got, want := s[1].(int64), d.Rows[rowIdx][1].(int64); got != want {
+			t.Errorf("sess[%d] starts at %d, its row says %d", i, got, want)
+		}
+		for k := 0; k < nViews; k++ {
+			row := d.Rows[rowIdx+1+k]
+			if row[0] != rowView {
+				t.Fatalf("sess[%d]: row %d is not a view row", i, rowIdx+1+k)
+			}
+			if got, want := row[1].(int64), p.Sessions[i].Views[k].WatchedAt.Unix()-d.T0; got != want {
+				t.Errorf("sess[%d] view %d: ts = %d, want %d", i, k, got, want)
+			}
+		}
+		// And the block ends there: the next row starts the next sitting.
+		if end := rowIdx + 1 + nViews; end < len(d.Rows) && d.Rows[end][0] != rowSession {
+			t.Errorf("sess[%d]: row %d should open the next sitting", i, end)
+		}
+	}
+}
+
+func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p)
+
+	if len(d.Days) != len(p.Days) {
+		t.Fatalf("days = %d entries, want %d", len(d.Days), len(p.Days))
+	}
+	for i, day := range d.Days {
+		if day[0] != p.Days[i].EpochDay || day[1] != p.Days[i].Views {
+			t.Errorf("days[%d] = %v, want epochDay %d and %d views", i, day, p.Days[i].EpochDay, p.Days[i].Views)
+		}
+		if got := d.Areas[day[2].(int)]; got != p.Days[i].Area {
+			t.Errorf("days[%d] area = %q, want %q", i, got, p.Days[i].Area)
+		}
+		from, to := day[3].(int), day[4].(int)
+		for si := from; si <= to; si++ {
+			if got := d.Sess[si][5].(int); got != i {
+				t.Errorf("sess[%d] points at day %d, but day %d claims it", si, got, i)
+			}
+		}
+	}
+
+	if len(d.Trans) != len(p.Trans) {
+		t.Fatalf("trans = %d entries, want %d", len(d.Trans), len(p.Trans))
+	}
+	for i, tr := range d.Trans {
+		if d.Areas[tr[0]] != p.Trans[i].From || d.Areas[tr[1]] != p.Trans[i].To || tr[2] != p.Trans[i].N {
+			t.Errorf("trans[%d] = %v, want %+v", i, tr, p.Trans[i])
+		}
+	}
+
+	// areaViews stays parallel to areas and counts the main lane only, so the
+	// legend can size an area without walking 35k rows.
+	if len(d.AreaViews) != len(d.Areas) {
+		t.Fatalf("areaViews = %d, areas = %d", len(d.AreaViews), len(d.Areas))
+	}
+	total := 0
+	for _, n := range d.AreaViews {
+		total += n
+	}
+	if want := p.Stats.Views - p.Stats.OverlapViews; total != want {
+		t.Errorf("areaViews sum to %d, want %d main-lane views", total, want)
+	}
+
+	// The key names are the contract the page is written against.
+	raw, err := json.Marshal(d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"sess", "days", "trans", "areaViews", "stats"} {
+		if _, ok := obj[k]; !ok {
+			t.Errorf("payload misses %q", k)
+		}
+	}
+	var stats map[string]json.RawMessage
+	if err := json.Unmarshal(obj["stats"], &stats); err != nil {
+		t.Fatal(err)
+	}
+	keys := []string{"views", "sessions", "dropped", "overlapViews", "rabbitViews",
+		"hoursUpper", "longestSess", "longestSessN", "longestSessS",
+		"deepestRabbit", "deepestRabbitN", "busiestDay", "busiestDayN"}
+	for _, k := range keys {
+		if _, ok := stats[k]; !ok {
+			t.Errorf("stats misses %q", k)
+		}
+	}
+	if len(stats) != len(keys) {
+		t.Errorf("stats has %d keys, want exactly %d", len(stats), len(keys))
+	}
+	// The span travels as seconds — JSON has no duration.
+	var spanS int
+	if err := json.Unmarshal(stats["longestSessS"], &spanS); err != nil {
+		t.Fatal(err)
+	}
+	if want := int(p.Stats.LongestSessionSpan.Seconds()); spanS != want {
+		t.Errorf("longestSessS = %d, want %d", spanS, want)
 	}
 }

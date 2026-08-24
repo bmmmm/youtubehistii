@@ -39,24 +39,22 @@ func cmdWatchPath(args []string) error {
 	}
 
 	// Aggregates only — the page carries the titles, the terminal does not
-	// need them.
-	fmt.Printf("%d views on the timeline in %d sessions", path.Views, len(path.Sessions))
-	if path.Dropped > 0 {
-		fmt.Printf(", %d without a timestamp left off", path.Dropped)
+	// need them. They come straight from the stats the page runs on, so the
+	// two can never drift apart.
+	st := path.Stats
+	fmt.Printf("%d views on the timeline in %d sessions", st.Views, st.Sessions)
+	if st.Dropped > 0 {
+		fmt.Printf(", %d without a timestamp left off", st.Dropped)
 	}
 	fmt.Println()
-	overlap, rabbit := 0, 0
-	for _, s := range path.Sessions {
-		for _, v := range s.Views {
-			if v.Overlap {
-				overlap++
-			}
-			if v.Rabbit {
-				rabbit++
-			}
-		}
+	fmt.Printf("%d views suspected of overlapping, %d inside a same-area chain\n",
+		st.OverlapViews, st.RabbitViews)
+	if len(path.Days) > 0 {
+		d := path.Days[st.BusiestDay]
+		fmt.Printf("%d days carried a sitting (%s … %s), busiest %s with %d views\n",
+			len(path.Days), path.Days[0].Date, path.Days[len(path.Days)-1].Date,
+			d.Date, st.BusiestDayViews)
 	}
-	fmt.Printf("%d views suspected of overlapping, %d inside a same-area chain\n", overlap, rabbit)
 	fmt.Printf("wrote %s (%.1f MB)\n", htmlPath, float64(len(html))/(1<<20))
 	return nil
 }

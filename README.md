@@ -153,11 +153,45 @@ are applied when verdicts are read back, so folding costs no re-classification.
 ## The watch path
 
 `watchpath` renders the same classified views along the time axis instead of
-aggregating them: `data/out/watchpath.html`, newest sitting first. A gap of
-more than 30 minutes starts a new sitting; within one, the gap to the next
-start is compared against the video's length to say whether it was watched
-through, mostly, or left early. Runs of four or more videos on one area, less
-than 15 minutes apart, are marked as a chain.
+aggregating them: `data/out/watchpath.html`. It is one self-contained page
+with four levels you zoom through, and the browser's back button walks them
+backwards because every level is a real address — `#/`, `#/day/2026-05-04`,
+`#/session/1187`, `#/list`.
+
+**The overview** opens on a calendar of the whole span, one cell per day: the
+hue is the area most of that day's main-lane views belonged to, the opacity is
+that day's views against the busiest day of the span. Beside it the areas sit
+on a ring, and every arc is one video of an area following another *inside*
+one sitting — a self-loop is a run that stayed on its topic. Click an area and
+the calendar keeps only the days it dominated. Above both, the headline
+numbers: sittings, longest sitting, deepest chain, the share of views
+suspected of overlapping, the busiest day.
+
+**A day** is 24 hours of axis with one bar per video — x is the start, the
+width is the video's *full length*, not watch time. What looks like background
+runs in a second lane below, so you can see what lay inside what, and the
+sittings are brackets above the lanes. The axis grows past 24 rather than
+clipping, because an evening running into the small hours is exactly what this
+view is for.
+
+**A sitting** is drawn as the path it was: video after video, each edge
+labelled with what the gap says, overlap views branching off sideways to the
+video that was still running, and a coloured bracket where four or more videos
+of one area ran back to back. The same sitting follows underneath as cards.
+
+**All views as one list** is still there, reachable from every level — it is
+just no longer the front door.
+
+A gap of more than 30 minutes starts a new sitting; within one, the gap to the
+next start is compared against the video's length to say whether it was
+watched through, mostly, or left early. Runs of four or more videos on one
+area, less than 15 minutes apart, are marked as a chain.
+
+Times are wall clock. Takeout stores every timestamp as UTC, and `watchpath`
+reads them in the local zone of the machine that generates the page: a video
+started at 01:20 belongs to that night, not to the previous UTC day. A sitting
+counts on the day it BEGAN, so an evening that runs past midnight stays whole
+on that evening instead of being cut in two.
 
 The same export limit shapes this view as the one below, only harder: Takeout
 records when a video was STARTED and nothing else — no end, no watch time, no
