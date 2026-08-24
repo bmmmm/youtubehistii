@@ -18,6 +18,7 @@ youtubehistii import   data/watch-history.json    → data/history.jsonl
 youtubehistii enrich                              → data/cache/meta/<videoID>.json
 youtubehistii classify                            → data/classified.jsonl
 youtubehistii report                              → data/out/report.html + report.csv
+youtubehistii watchpath                           → data/out/watchpath.html
 
 youtubehistii run      all of enrich + classify + report in one go, overlapped
 ```
@@ -148,6 +149,24 @@ want to pay for a full re-ask. Enriched metadata is never affected.
 
 If the model spells one subject two ways, fold them with `sub_aliases:` — those
 are applied when verdicts are read back, so folding costs no re-classification.
+
+## The watch path
+
+`watchpath` renders the same classified views along the time axis instead of
+aggregating them: `data/out/watchpath.html`, newest sitting first. A gap of
+more than 30 minutes starts a new sitting; within one, the gap to the next
+start is compared against the video's length to say whether it was watched
+through, mostly, or left early. Runs of four or more videos on one area, less
+than 15 minutes apart, are marked as a chain.
+
+The same export limit shapes this view as the one below, only harder: Takeout
+records when a video was STARTED and nothing else — no end, no watch time, no
+device. So a short gap after a long video has two readings that the data
+cannot separate: the video was abandoned, or it kept running while something
+else was started. Where a short video from another area falls inside a long
+one, the page sets it aside in a second lane labeled *overlap suspected* —
+a marking, never a claim. Videos whose length is unknown (deleted, or not yet
+enriched) get no label at all rather than a guessed one.
 
 ## Honesty note on "time spent"
 

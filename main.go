@@ -52,6 +52,11 @@ Usage:
                                   taxonomy from the data (flags: -tags,
                                   -tags-per-category 15; read-only, no LLM)
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
+  youtubehistii watchpath         render data/out/watchpath.html: the same views along the
+                                  time axis — sittings split by a 30 min gap, newest first,
+                                  with what the gap to the next start suggests about each
+                                  video. Takeout logs only when a video was STARTED, so
+                                  every label there is a reading of that gap, never a fact
   youtubehistii version           print version
 
 Global flag (each subcommand): -data <dir>  data directory (default "data")
@@ -80,6 +85,8 @@ func main() {
 		err = cmdInspect(args)
 	case "report":
 		err = cmdReport(args)
+	case "watchpath":
+		err = cmdWatchPath(args)
 	case "version", "--version", "-v":
 		fmt.Println(resolveVersion())
 	case "help", "--help", "-h":
