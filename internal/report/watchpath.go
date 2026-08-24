@@ -80,10 +80,35 @@ type Path struct {
 	Dropped  int // views without a timestamp — no place on a time axis
 	From, To time.Time
 
-	Days  []DayAgg     // OLDEST first — calendar order
-	Trans []Transition // by N desc, then From, then To — deterministic
-	Stats PathStats
+	Days     []DayAgg     // OLDEST first — calendar order
+	Trans    []Transition // by N desc, then From, then To — deterministic
+	Clusters []Cluster    // the topic tree, most-watched area first
+	Stats    PathStats
 }
+
+// Cluster is one node of the topic tree: an area, a subject inside it, or a
+// channel inside that subject. Three levels, always — a view classified to
+// the bare area still gets a subject node, because a tree with ragged depth
+// would draw two different things at the same size and call them the same.
+// NoSubject and NoChannel are what that node is called.
+//
+// Unlike the day's dominant area, this counts overlap views too. The calendar
+// asks what a day was ABOUT, where background must not vote; this asks what
+// was watched, and a track that ran under a documentary was watched.
+type Cluster struct {
+	Name      string
+	Views     int
+	DurationS int // upper bound: the full length of every video below
+	Children  []Cluster
+}
+
+// The buckets for what the export leaves open. They are named rather than
+// dropped: leaving them out would make every circle above them a little
+// wrong, which is the one thing a proportional drawing may not be.
+const (
+	NoSubject = "(no subject)"
+	NoChannel = "(no channel)"
+)
 
 // DayAgg is one calendar day of the path: the sittings that started on it.
 //
@@ -200,6 +225,7 @@ func BuildPath(rows []classify.Verdict) *Path {
 	p.Sessions = sessions
 	p.Days = buildDays(sessions)
 	p.Trans = buildTransitions(sessions)
+	p.Clusters = buildClusters(sessions)
 	p.Stats = buildStats(p)
 	return p
 }
@@ -340,6 +366,63 @@ func buildTransitions(sessions []Session) []Transition {
 		return out[i].To < out[j].To
 	})
 	return out
+}
+
+// buildClusters folds every view into the area / subject / channel tree the
+// cluster view packs into circles.
+//
+// The counts roll up rather than being recomputed per level, so a parent can
+// never disagree with the sum of its children — in a drawing where area IS the
+// number, that disagreement would be a visible lie.
+func buildClusters(sessions []Session) []Cluster {
+	type node struct {
+		views int
+		durS  int
+		kids  map[string]*node
+	}
+	newNode := func() *node { return &node{kids: map[string]*node{}} }
+	child := func(n *node, name string) *node {
+		k := n.kids[name]
+		if k == nil {
+			k = newNode()
+			n.kids[name] = k
+		}
+		return k
+	}
+	root := newNode()
+	for _, s := range sessions {
+		for _, v := range s.Views {
+			sub, ch := v.Sub, v.Channel
+			if sub == "" {
+				sub = NoSubject
+			}
+			if ch == "" {
+				ch = NoChannel
+			}
+			area := child(root, v.Area)
+			subject := child(area, sub)
+			for _, n := range []*node{area, subject, child(subject, ch)} {
+				n.views++
+				n.durS += v.DurationS
+			}
+		}
+	}
+
+	// Depth-first, most-watched first at every level with the name as the
+	// tie-break, so two equally watched subjects do not swap between runs.
+	var collect func(n *node) []Cluster
+	collect = func(n *node) []Cluster {
+		out := make([]Cluster, 0, len(n.kids))
+		for name, k := range n.kids {
+			out = append(out, Cluster{
+				Name: name, Views: k.views, DurationS: k.durS,
+				Children: collect(k),
+			})
+		}
+		sortByViews(out, func(c Cluster) (int, string) { return c.Views, c.Name })
+		return out
+	}
+	return collect(root)
 }
 
 // buildStats reduces the path to its headline numbers. It needs Days already

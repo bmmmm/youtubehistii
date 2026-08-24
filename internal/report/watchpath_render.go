@@ -48,7 +48,24 @@ type pathData struct {
 	Days      [][]any    `json:"days"` // parallel to Path.Days, oldest first
 	Trans     [][]int    `json:"trans"`
 	AreaViews []int      `json:"areaViews"` // parallel to Areas: main-lane views per area
+	Clusters  [][]any    `json:"clusters"`  // area / subject / channel, most-watched first
 	Stats     *statsData `json:"stats"`
+}
+
+// clusterNodes turns the topic tree into [name, views, durationS, children],
+// with the children left off a leaf. Positional, like every other row on this
+// page: the tree has one entry per channel and the key names would outweigh
+// the numbers they label.
+func clusterNodes(cs []Cluster) [][]any {
+	out := make([][]any, 0, len(cs))
+	for _, c := range cs {
+		n := []any{c.Name, c.Views, c.DurationS}
+		if len(c.Children) > 0 {
+			n = append(n, clusterNodes(c.Children))
+		}
+		out = append(out, n)
+	}
+	return out
 }
 
 // statsData is PathStats as the page reads it — durations in seconds, because
@@ -198,6 +215,11 @@ func buildPathData(p *Path) *pathData {
 	for _, tr := range p.Trans {
 		d.Trans = append(d.Trans, []int{areas.get(tr.From), areas.get(tr.To), tr.N})
 	}
+	// The topic tree ships as names, not indices. Every other aggregate points
+	// into a lookup table because it repeats an area thousands of times; here
+	// each name appears exactly once, so an index would only add a hop — and
+	// the page needs the plain name anyway to put it in a URL.
+	d.Clusters = clusterNodes(p.Clusters)
 	d.Stats = &statsData{
 		Views:          p.Stats.Views,
 		Sessions:       p.Stats.Sessions,

@@ -779,3 +779,199 @@ func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 		t.Errorf("longestSessS = %d, want %d", spanS, want)
 	}
 }
+
+// clusterByName finds a node by name among siblings, so a test can say what
+// it is looking for instead of counting positions.
+func clusterByName(cs []Cluster, name string) *Cluster {
+	for i := range cs {
+		if cs[i].Name == name {
+			return &cs[i]
+		}
+	}
+	return nil
+}
+
+// sumViews is what every parent in the tree has to equal.
+func sumViews(cs []Cluster) int {
+	n := 0
+	for _, c := range cs {
+		n += c.Views
+	}
+	return n
+}
+
+func TestClusterCountsRollUp(t *testing.T) {
+	// Area totals are the sum of their subjects, subjects the sum of their
+	// channels. In a drawing where the area of a circle IS the count, a parent
+	// that disagrees with its children is a visible lie.
+	p := BuildPath(pathFixture())
+	if got, want := sumViews(p.Clusters), p.Views; got != want {
+		t.Errorf("areas sum to %d views, the path has %d", got, want)
+	}
+	var walk func(c Cluster, depth int)
+	walk = func(c Cluster, depth int) {
+		if len(c.Children) == 0 {
+			if depth != 2 {
+				t.Errorf("%q is a leaf at depth %d, want the channel level (2)", c.Name, depth)
+			}
+			return
+		}
+		if got := sumViews(c.Children); got != c.Views {
+			t.Errorf("%q has %d views, its children sum to %d", c.Name, c.Views, got)
+		}
+		durs := 0
+		for _, k := range c.Children {
+			durs += k.DurationS
+		}
+		if durs != c.DurationS {
+			t.Errorf("%q has %ds, its children sum to %ds", c.Name, c.DurationS, durs)
+		}
+		for _, k := range c.Children {
+			walk(k, depth+1)
+		}
+	}
+	for _, c := range p.Clusters {
+		walk(c, 0)
+	}
+}
+
+func TestClusterTreeIsAlwaysThreeLevels(t *testing.T) {
+	// A view classified to the bare area still gets a subject node. Ragged
+	// depth would draw a channel and a subject at the same size and call them
+	// the same thing.
+	rows := []classify.Verdict{
+		view(0, "music", 300),              // no sub
+		view(5*time.Minute, "music", 300),  // no sub
+		view(10*time.Minute, "music", 300), // gets a sub below
+	}
+	rows[2].Topic = "music/hip-hop"
+	rows[2].Channel = "" // and no channel either
+	p := BuildPath(rows)
+
+	music := clusterByName(p.Clusters, "music")
+	if music == nil {
+		t.Fatalf("no music area in %v", p.Clusters)
+	}
+	if music.Views != 3 {
+		t.Errorf("music = %d views, want 3", music.Views)
+	}
+	bare := clusterByName(music.Children, NoSubject)
+	if bare == nil || bare.Views != 2 {
+		t.Fatalf("the two subject-less views need a %q node, got %v", NoSubject, music.Children)
+	}
+	hip := clusterByName(music.Children, "hip-hop")
+	if hip == nil || hip.Views != 1 {
+		t.Fatalf("hip-hop = %v, want 1 view", hip)
+	}
+	if ch := clusterByName(hip.Children, NoChannel); ch == nil || ch.Views != 1 {
+		t.Errorf("a view with no channel needs a %q node, got %v", NoChannel, hip.Children)
+	}
+	if ch := clusterByName(bare.Children, "chan"); ch == nil || ch.Views != 2 {
+		t.Errorf("the named channel should carry both views, got %v", bare.Children)
+	}
+}
+
+func TestClusterOrderIsDeterministic(t *testing.T) {
+	// Most-watched first, ties by name — the packing draws them in this order,
+	// so two runs over the same data have to hand it the same list.
+	rows := []classify.Verdict{
+		view(0, "sports", 60),
+		view(5*time.Minute, "sports", 60),
+		view(10*time.Minute, "music", 60),
+		view(15*time.Minute, "music", 60),
+		view(20*time.Minute, "gaming", 60), // ties music and sports? no: 1 view
+	}
+	p := BuildPath(rows)
+	var got []string
+	for _, c := range p.Clusters {
+		got = append(got, c.Name)
+	}
+	// music and sports both have 2; the name breaks the tie, gaming trails.
+	want := []string{"music", "sports", "gaming"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("areas = %v, want %v", got, want)
+	}
+}
+
+func TestClusterCountsOverlapViewsToo(t *testing.T) {
+	// The calendar asks what a day was ABOUT and lets background music abstain.
+	// This asks what was watched, and a track that ran under a documentary was
+	// watched — so the two aggregates deliberately disagree here.
+	p := BuildPath([]classify.Verdict{
+		view(0, "film-animation", 45*60),
+		view(5*time.Minute, "music", 200),
+		view(9*time.Minute, "music", 200),
+	})
+	overlaps := 0
+	for _, v := range flat(p) {
+		if v.Overlap {
+			overlaps++
+		}
+	}
+	if overlaps != 2 {
+		t.Fatalf("fixture needs its two overlap views, got %d", overlaps)
+	}
+	if p.Days[0].Area != "film-animation" {
+		t.Errorf("the day is about the documentary, got %q", p.Days[0].Area)
+	}
+	music := clusterByName(p.Clusters, "music")
+	if music == nil || music.Views != 2 {
+		t.Errorf("the tree counts the background too: music = %v, want 2 views", music)
+	}
+	if sumViews(p.Clusters) != 3 {
+		t.Errorf("the tree holds every view, got %d of 3", sumViews(p.Clusters))
+	}
+}
+
+func TestClusterTreeEmpty(t *testing.T) {
+	if cs := BuildPath(nil).Clusters; len(cs) != 0 {
+		t.Errorf("empty path, got %v", cs)
+	}
+}
+
+func TestPathDataSerialisesTheClusterTree(t *testing.T) {
+	// Leaves carry three fields, everything above carries a fourth that holds
+	// the children — that shape is what the packing walks.
+	d := buildPathData(BuildPath(pathFixture()))
+	if len(d.Clusters) != len(BuildPath(pathFixture()).Clusters) {
+		t.Fatalf("areas = %d serialised, want %d", len(d.Clusters), len(BuildPath(pathFixture()).Clusters))
+	}
+	var walk func(n []any, depth int)
+	walk = func(n []any, depth int) {
+		if _, ok := n[0].(string); !ok {
+			t.Fatalf("node at depth %d starts with %T, want the name", depth, n[0])
+		}
+		if depth == 2 {
+			if len(n) != 3 {
+				t.Errorf("channel node has %d fields, want 3 (no children)", len(n))
+			}
+			return
+		}
+		if len(n) != 4 {
+			t.Fatalf("node at depth %d has %d fields, want 4", depth, len(n))
+		}
+		kids, ok := n[3].([][]any)
+		if !ok || len(kids) == 0 {
+			t.Fatalf("node at depth %d carries no children", depth)
+		}
+		for _, k := range kids {
+			walk(k, depth+1)
+		}
+	}
+	for _, n := range d.Clusters {
+		walk(n, 0)
+	}
+
+	// And it has to survive the JSON round trip the page actually reads.
+	raw, err := json.Marshal(d.Clusters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back []any
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatalf("cluster payload is not valid JSON: %v", err)
+	}
+	if len(back) != len(d.Clusters) {
+		t.Errorf("round trip gave %d areas, want %d", len(back), len(d.Clusters))
+	}
+}

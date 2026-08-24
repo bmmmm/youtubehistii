@@ -179,6 +179,23 @@ labelled with what the gap says, overlap views branching off sideways to the
 video that was still running, and a coloured bracket where four or more videos
 of one area ran back to back. The same sitting follows underneath as cards.
 
+**The topic tree** is the other cut through the same views: areas holding
+subjects holding channels, drawn as a cluster of nested circles. Clicking a
+circle makes it the root, and the level below it grows big enough to read —
+that step is an address too (`#/topics/music`, `#/topics/music/subject-a`),
+so the back button walks the drill-down back out. Circles nest, which means a
+leaf's area is proportional to its views while a parent is only as big as its
+children need; the page says so instead of letting the drawing imply a
+precision it does not have. Circles under 14 px are not opened — their
+children would be texture, not information — and the page states how many
+stayed shut rather than quietly dropping them. A view classified to the bare
+area still gets a subject node called `(no subject)`, because leaving it out
+would make every circle above it a little wrong.
+
+Unlike the calendar's dominant area, the tree counts overlap views too. The
+calendar asks what a day was *about*, where background must not vote; the tree
+asks what was watched, and a track that ran under a documentary was watched.
+
 **All views as one list** is still there, reachable from every level — it is
 just no longer the front door.
 

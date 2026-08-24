@@ -14,7 +14,8 @@ package report
 //     is one Go raw string literal that html/template parses.
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
-var watchPathTpl = pageHead + pageCSS + pageBody + coreJS + overviewJS + detailJS + pageTail
+var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
+	overviewJS + detailJS + clusterJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -465,7 +466,7 @@ if (D.sess) D.sess.forEach((s, i) => rowToSession.set(s[S_ROW], i));
 // the same path backwards for free, and a view is a link that can be shared.
 let teardown = null;
 
-function crumbs(trail) {
+function crumbs(trail, here) {
   crumbsEl.textContent = "";
   trail.forEach((c, i) => {
     if (i) crumbsEl.appendChild($("span", "sep", "›"));
@@ -478,12 +479,20 @@ function crumbs(trail) {
     }
   });
   crumbsEl.appendChild($("span", "spacer"));
-  // The flat list is a sibling of the whole zoom, not a step inside it, so it
-  // sits on the far side of the bar rather than in the trail.
-  const onList = trail.length === 1 && !trail[0].hash && trail[0].text === "all views";
-  const alt = $("a", "alt", onList ? "overview" : "all views (" + D.views.toLocaleString() + ")");
-  alt.href = onList ? "#/" : "#/list";
-  crumbsEl.appendChild(alt);
+  // The topic tree and the flat list are siblings of the calendar zoom, not
+  // steps inside it: both hold every view, cut a different way. They sit on
+  // the far side of the bar, and the one you are already in drops out rather
+  // than repeating what the trail just said.
+  const sides = [
+    { id: "topics", text: "topics", hash: "#/topics" },
+    { id: "list", text: "all views (" + D.views.toLocaleString() + ")", hash: "#/list" },
+  ];
+  for (const s of sides) {
+    if (s.id === here) continue;
+    const a = $("a", "alt", s.text);
+    a.href = s.hash;
+    crumbsEl.appendChild(a);
+  }
 }
 
 function notFound(root, what) {
@@ -497,6 +506,21 @@ function route() {
   const h = (location.hash || "").replace(/^#/, "") || "/";
   const parts = h.split("/").filter(s => s.length > 0);
 
+  if (parts[0] === "topics") {
+    // The focus travels as names, not indices: an index would move whenever
+    // the data is re-read, and a link into the tree should still land next
+    // month. Names are URI-encoded because a subject may hold a slash.
+    const area = parts[1] ? decodeURIComponent(parts[1]) : "";
+    const sub = parts[2] ? decodeURIComponent(parts[2]) : "";
+    const trail = [{ text: "overview", hash: "/" },
+                   { text: "topics", hash: area ? "/topics" : null }];
+    if (area) trail.push({ text: area, hash: sub ? "/topics/" + encodeURIComponent(area) : null });
+    if (sub) trail.push({ text: sub });
+    crumbs(trail, "topics");
+    scrollTo(0, 0);
+    teardown = renderClusters(viewEl, area, sub) || null;
+    return;
+  }
   if (parts[0] === "day" && parts[1]) {
     const di = dayByDate.has(parts[1]) ? dayByDate.get(parts[1]) : -1;
     crumbs([{ text: "overview", hash: "/" }, { text: parts[1] }]);
@@ -521,7 +545,7 @@ function route() {
     return;
   }
   if (parts[0] === "list") {
-    crumbs([{ text: "all views" }]);
+    crumbs([{ text: "overview", hash: "/" }, { text: "all views" }], "list");
     teardown = renderList(viewEl) || null;
     return;
   }

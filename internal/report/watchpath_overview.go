@@ -70,8 +70,11 @@ function statTiles(st, days) {
   const t = $("div", "tiles");
   const n = st.views || 0;
 
+  // The views tile is the way into the topic tree: the calendar answers when,
+  // the tree answers what, and both start from the same number.
   t.appendChild(tile("views", n.toLocaleString(),
-    days.length.toLocaleString() + " days carried a sitting"));
+    days.length.toLocaleString() + " days carried a sitting · open the topic tree",
+    "#/topics"));
   t.appendChild(tile("sittings", (st.sessions || 0).toLocaleString(),
     st.sessions ? (n / st.sessions).toFixed(1) + " videos each" : ""));
   // Never "hours watched": this is the sum of full video lengths, and the
