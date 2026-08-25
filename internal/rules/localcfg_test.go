@@ -20,9 +20,10 @@ func TestLocalConfigLoads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Every category the meta cache produced on 2026-08-23, over 26418
-	// enriched videos. Each one has to resolve to an area, or those videos
-	// silently fall back to the LLM for a decision that is already made.
+	// Every category observed across a full library enrich — read off a real
+	// meta cache rather than copied from documentation, which is what makes
+	// the list trustworthy. Each one has to resolve to an area, or those
+	// videos silently fall back to the LLM for a decision already made.
 	for _, c := range []string{
 		"Music", "Science & Technology", "Entertainment", "Sports", "People & Blogs",
 		"Gaming", "News & Politics", "Education", "Howto & Style", "Film & Animation",

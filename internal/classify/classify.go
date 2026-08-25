@@ -197,10 +197,14 @@ func BuildBatchPrompt(cfg *rules.Config, items []Item, seeds map[string][]string
 // that could mean two things is left alone to fail into the single-request
 // fallback. Observed against Qwen3.6-35B-A3B on real batches:
 //
-//	5 fields "1 music subject-a consume 0.9" — area and sub split on a
+// The layouts below were observed; the topics in them are illustrations, not
+// transcripts — a real batch is somebody's watch history, and its subjects do
+// not belong in a public comment.
+//
+//	5 fields "1 gaming factorio consume 0.9" — area and sub split on a
 //	  space instead of a slash. Telling the model the topic has two parts is
 //	  what invites this, and refusing the line costs a request per video.
-//	3 fields "1 pets-animals/fisch-gift 0.9" — the mode is simply left out.
+//	3 fields "1 science-technology/talks 0.9" — the mode is simply left out.
 //	  An absent mode already means "cannot tell" everywhere else.
 func normalizeFields(cfg *rules.Config, fields []string) []string {
 	switch len(fields) {

@@ -156,7 +156,7 @@ are applied when verdicts are read back, so folding costs no re-classification.
 aggregating them: `data/out/watchpath.html`. It is one self-contained page
 with five views, and the browser's back button walks them backwards because
 every one of them is a real address — `#/`, `#/day/2026-05-04`,
-`#/session/1187`, `#/topics/music/subject-a`, `#/list`.
+`#/session/1187`, `#/topics/gaming/factorio`, `#/list`.
 
 **The overview** opens on one card per view, each holding a real miniature of
 your own data — the topic tree packed by the same code the full view uses, the
@@ -190,7 +190,7 @@ of one area ran back to back. The same sitting follows underneath as cards.
 **The topic tree** is the other cut through the same views: areas holding
 subjects holding channels, drawn as a cluster of nested circles. Clicking a
 circle makes it the root, and the level below it grows big enough to read —
-that step is an address too (`#/topics/music`, `#/topics/music/subject-a`),
+that step is an address too (`#/topics/gaming`, `#/topics/gaming/factorio`),
 so the back button walks the drill-down back out. Circles nest, which means a
 leaf's area is proportional to its views while a parent is only as big as its
 children need; the page says so instead of letting the drawing imply a

@@ -844,31 +844,31 @@ func TestClusterTreeIsAlwaysThreeLevels(t *testing.T) {
 	// depth would draw a channel and a subject at the same size and call them
 	// the same thing.
 	rows := []classify.Verdict{
-		view(0, "music", 300),              // no sub
-		view(5*time.Minute, "music", 300),  // no sub
-		view(10*time.Minute, "music", 300), // gets a sub below
+		view(0, "gaming", 300),              // no sub
+		view(5*time.Minute, "gaming", 300),  // no sub
+		view(10*time.Minute, "gaming", 300), // gets a sub below
 	}
-	rows[2].Topic = "music/hip-hop"
+	rows[2].Topic = "gaming/factorio"
 	rows[2].Channel = "" // and no channel either
 	p := BuildPath(rows)
 
-	music := clusterByName(p.Clusters, "music")
-	if music == nil {
-		t.Fatalf("no music area in %v", p.Clusters)
+	area := clusterByName(p.Clusters, "gaming")
+	if area == nil {
+		t.Fatalf("no gaming area in %v", p.Clusters)
 	}
-	if music.Views != 3 {
-		t.Errorf("music = %d views, want 3", music.Views)
+	if area.Views != 3 {
+		t.Errorf("gaming = %d views, want 3", area.Views)
 	}
-	bare := clusterByName(music.Children, NoSubject)
+	bare := clusterByName(area.Children, NoSubject)
 	if bare == nil || bare.Views != 2 {
-		t.Fatalf("the two subject-less views need a %q node, got %v", NoSubject, music.Children)
+		t.Fatalf("the two subject-less views need a %q node, got %v", NoSubject, area.Children)
 	}
-	hip := clusterByName(music.Children, "hip-hop")
-	if hip == nil || hip.Views != 1 {
-		t.Fatalf("hip-hop = %v, want 1 view", hip)
+	sub := clusterByName(area.Children, "factorio")
+	if sub == nil || sub.Views != 1 {
+		t.Fatalf("factorio = %v, want 1 view", sub)
 	}
-	if ch := clusterByName(hip.Children, NoChannel); ch == nil || ch.Views != 1 {
-		t.Errorf("a view with no channel needs a %q node, got %v", NoChannel, hip.Children)
+	if ch := clusterByName(sub.Children, NoChannel); ch == nil || ch.Views != 1 {
+		t.Errorf("a view with no channel needs a %q node, got %v", NoChannel, sub.Children)
 	}
 	if ch := clusterByName(bare.Children, "chan"); ch == nil || ch.Views != 2 {
 		t.Errorf("the named channel should carry both views, got %v", bare.Children)
