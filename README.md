@@ -158,7 +158,15 @@ with four levels you zoom through, and the browser's back button walks them
 backwards because every level is a real address — `#/`, `#/day/2026-05-04`,
 `#/session/1187`, `#/list`.
 
-**The overview** opens on a calendar of the whole span, one cell per day: the
+**The overview** opens on one card per view, each holding a real miniature of
+your own data — the topic tree packed by the same code the full view uses, the
+busiest day on its hours, the longest sitting as a path, the list as a stack —
+with a small motion that says what that view does. A view reachable only
+through a word in the corner may as well not exist, so the front page shows
+what it has. The motion honours `prefers-reduced-motion` and each card still
+reads as a still picture without it.
+
+Below the cards, a calendar of the whole span, one cell per day: the
 hue is the area most of that day's main-lane views belonged to, the opacity is
 that day's views against the busiest day of the span. Beside it the areas sit
 on a ring, and every arc is one video of an area following another *inside*

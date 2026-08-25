@@ -15,7 +15,7 @@ package report
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
 var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
-	overviewJS + detailJS + clusterJS + pageTail
+	overviewJS + detailJS + clusterJS + introJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -89,6 +89,51 @@ nav#crumbs .alt { color: var(--muted); }
 .tile .s { display: block; font-size: .72rem; color: var(--muted); line-height: 1.3; }
 a.tile { color: inherit; text-decoration: none; }
 a.tile:hover { background: var(--card2); outline: 1px solid var(--line); }
+
+/* The ways in. A page whose best views sit behind a word in the top corner
+   has hidden them, so the first thing under the heading is one card per view,
+   each carrying a REAL drawing of the real data — a made-up example would be
+   a strange thing to put first on a page this careful about what it claims.
+   The motion is the label: it shows what the view DOES, which a screenshot
+   cannot. */
+.ways { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: .6rem; margin: 1.1rem 0 1.3rem; }
+.way { display: block; text-decoration: none; color: inherit;
+  background: var(--card); border: 1px solid transparent; border-radius: .5rem;
+  padding: .5rem .6rem .6rem; overflow: hidden; }
+.way:hover, .way:focus-visible { background: var(--card2); border-color: var(--line); }
+.way h3 { margin: .4rem 0 .1rem; font-size: .85rem; font-weight: 600; }
+.way p { margin: 0; font-size: .72rem; color: var(--muted); line-height: 1.3; }
+.mini { display: block; width: 100%; height: 4.6rem; }
+.mini circle, .mini rect, .mini path, .mini line, .mini g { transform-box: fill-box;
+  transform-origin: center; }
+
+/* Four motions, one per view, each saying what that view is: a circle opening
+   up, a day being swept, a path being walked, a list running on. Slow and
+   low-contrast on purpose — this is a hint, not a carousel. */
+@keyframes wayGrow { 0%, 100% { transform: scale(1); opacity: .5; }
+  50% { transform: scale(1.22); opacity: 1; } }
+@keyframes waySweep { from { transform: translateX(0); } to { transform: translateX(152px); } }
+/* A short bright segment travelling along a line that is always there. An
+   earlier version animated the whole stroke in and out, which left the card
+   showing nothing but loose dots for half of every loop — a blink, not a path. */
+@keyframes wayDraw { from { stroke-dashoffset: 0; } to { stroke-dashoffset: -226; } }
+@keyframes wayRise { from { transform: translateY(3px); } to { transform: translateY(-13px); } }
+.mini .grow { animation: wayGrow 6s ease-in-out infinite; }
+.mini .sweep { animation: waySweep 7s linear infinite; }
+.mini .draw { stroke-dasharray: 26 200; animation: wayDraw 6.5s linear infinite; }
+.mini .rise { animation: wayRise 9s ease-in-out infinite alternate; }
+
+/* Motion is a preference, not a decoration budget. Everything above still
+   reads as a still picture with the path drawn in full. */
+@media (prefers-reduced-motion: reduce) {
+  .mini .grow, .mini .sweep, .mini .draw, .mini .rise { animation: none; }
+  .mini .grow { opacity: 1; }
+  /* Both of these only carry motion: the sweep is a clock hand with nothing
+     to point at when it stands still, and the travelling segment sits on top
+     of a line that is drawn anyway. Neither loses information by going. */
+  .mini .sweep, .mini .draw { visibility: hidden; }
+}
 
 /* One tooltip element for every view — a cell, an arc and a bar all want the
    same thing, and one node that moves beats hundreds of titles. */

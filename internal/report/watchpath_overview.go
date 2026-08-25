@@ -28,9 +28,13 @@ function renderOverview(root) {
   const st = D.stats || {};
   const days = D.days || [];
 
+  // The ways in come first, before the numbers: the other views used to be
+  // reachable only through a word in the corner, and a view nobody finds is a
+  // view that does not exist.
+  root.appendChild(introCards(st));
   root.appendChild(statTiles(st, days));
   root.appendChild($("p", "muted",
-    "Start with a day: a cell in the calendar opens that day, the day lists the sittings that began on it, and a sitting shows every video in the order it was started."));
+    "Below, the same views cut by time: a calendar of every day, and what followed what between the areas. A cell opens its day, a day lists the sittings that began on it, and a sitting shows every video in the order it was started."));
 
   if (!days.length) {
     root.appendChild($("p", "muted", "No day on this timeline carries a sitting."));
