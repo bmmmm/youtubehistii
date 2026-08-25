@@ -759,7 +759,11 @@ func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 	if err := json.Unmarshal(obj["stats"], &stats); err != nil {
 		t.Fatal(err)
 	}
-	keys := []string{"views", "sessions", "dropped", "overlapViews", "rabbitViews",
+	// Exactly the numbers a view puts on screen — the exact-count check is the
+	// point of this list: it fails when a field is serialised for nobody, which
+	// is how "dropped" (already at the payload's top level) and "rabbitViews"
+	// (printed by the CLI, never by the page) rode along unread until 2026-08-25.
+	keys := []string{"views", "sessions", "overlapViews",
 		"hoursUpper", "longestSess", "longestSessN", "longestSessS",
 		"deepestRabbit", "deepestRabbitN", "busiestDay", "busiestDayN"}
 	for _, k := range keys {

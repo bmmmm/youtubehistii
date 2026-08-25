@@ -28,18 +28,17 @@ const (
 // dominate the payload, everything else is an index — that keeps 35k views
 // near 4 MB instead of the 7 MB an array of objects would cost.
 type pathData struct {
-	T0       int64      `json:"t0"` // unix seconds of the oldest view
-	Chans    []string   `json:"chans"`
-	Areas    []string   `json:"areas"`
-	AreaHues []int      `json:"areaHues"` // parallel to Areas
-	Subs     []string   `json:"subs"`
-	Modes    []string   `json:"modes"`
-	Edges    []string   `json:"edges"`
-	Rows     [][]any    `json:"rows"`
-	Sessions int        `json:"sessions"`
-	Views    int        `json:"views"`
-	Dropped  int        `json:"dropped"`
-	Span     [2]float64 `json:"span"` // unix seconds, oldest and newest
+	T0       int64    `json:"t0"` // unix seconds of the oldest view
+	Chans    []string `json:"chans"`
+	Areas    []string `json:"areas"`
+	AreaHues []int    `json:"areaHues"` // parallel to Areas
+	Subs     []string `json:"subs"`
+	Modes    []string `json:"modes"`
+	Edges    []string `json:"edges"`
+	Rows     [][]any  `json:"rows"`
+	Sessions int      `json:"sessions"`
+	Views    int      `json:"views"`
+	Dropped  int      `json:"dropped"`
 
 	// The aggregates the other views run on. They index into rows, days and
 	// areas rather than repeating anything: the timeline is the one copy of
@@ -68,14 +67,16 @@ func clusterNodes(cs []Cluster) [][]any {
 	return out
 }
 
-// statsData is PathStats as the page reads it — durations in seconds, because
-// JSON has no duration and the page formats everything from seconds anyway.
+// statsData is PathStats as the page READS it — not as PathStats is. Only the
+// numbers a view actually puts on screen travel: durations in seconds, because
+// JSON has no duration, and nothing that already rides on the payload's top
+// level. A serialised field nobody reads is a promise the page does not keep,
+// so the count of dropped views stays at d.Dropped alone, and the chain total
+// stays in PathStats for the terminal to print.
 type statsData struct {
 	Views          int     `json:"views"`
 	Sessions       int     `json:"sessions"`
-	Dropped        int     `json:"dropped"`
 	OverlapViews   int     `json:"overlapViews"`
-	RabbitViews    int     `json:"rabbitViews"`
 	HoursUpper     float64 `json:"hoursUpper"`
 	LongestSess    int     `json:"longestSess"`
 	LongestSessN   int     `json:"longestSessN"`
@@ -131,7 +132,6 @@ func buildPathData(p *Path) *pathData {
 	}
 	if !p.From.IsZero() {
 		d.T0 = p.From.Unix()
-		d.Span = [2]float64{float64(p.From.Unix()), float64(p.To.Unix())}
 	}
 	chans := newIntern()
 	areas := newIntern()
@@ -223,9 +223,7 @@ func buildPathData(p *Path) *pathData {
 	d.Stats = &statsData{
 		Views:          p.Stats.Views,
 		Sessions:       p.Stats.Sessions,
-		Dropped:        p.Stats.Dropped,
 		OverlapViews:   p.Stats.OverlapViews,
-		RabbitViews:    p.Stats.RabbitViews,
 		HoursUpper:     p.Stats.HoursUpper,
 		LongestSess:    p.Stats.LongestSession,
 		LongestSessN:   p.Stats.LongestSessionViews,

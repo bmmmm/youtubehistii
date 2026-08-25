@@ -154,9 +154,9 @@ are applied when verdicts are read back, so folding costs no re-classification.
 
 `watchpath` renders the same classified views along the time axis instead of
 aggregating them: `data/out/watchpath.html`. It is one self-contained page
-with four levels you zoom through, and the browser's back button walks them
-backwards because every level is a real address — `#/`, `#/day/2026-05-04`,
-`#/session/1187`, `#/list`.
+with five views, and the browser's back button walks them backwards because
+every one of them is a real address — `#/`, `#/day/2026-05-04`,
+`#/session/1187`, `#/topics/music/subject-a`, `#/list`.
 
 **The overview** opens on one card per view, each holding a real miniature of
 your own data — the topic tree packed by the same code the full view uses, the
@@ -200,9 +200,8 @@ stayed shut rather than quietly dropping them. A view classified to the bare
 area still gets a subject node called `(no subject)`, because leaving it out
 would make every circle above it a little wrong.
 
-Unlike the calendar's dominant area, the tree counts overlap views too. The
-calendar asks what a day was *about*, where background must not vote; the tree
-asks what was watched, and a track that ran under a documentary was watched.
+Unlike the calendar and the transition graph, the tree counts the views they
+set aside as background — see the note on *overlap suspected* below.
 
 **All views as one list** is still there, reachable from every level — it is
 just no longer the front door.
@@ -222,10 +221,18 @@ The same export limit shapes this view as the one below, only harder: Takeout
 records when a video was STARTED and nothing else — no end, no watch time, no
 device. So a short gap after a long video has two readings that the data
 cannot separate: the video was abandoned, or it kept running while something
-else was started. Where a short video from another area falls inside a long
-one, the page sets it aside in a second lane labeled *overlap suspected* —
-a marking, never a claim. Videos whose length is unknown (deleted, or not yet
+else was started. Where a video from another area starts inside one of 20
+minutes or more, the page sets it aside in a second lane labeled *overlap
+suspected* — a marking, never a claim. Below that length the nearer reading is
+simply "clicked away", and calling that a parallel stream would turn a guess
+into a statement. Videos whose length is unknown (deleted, or not yet
 enriched) get no label at all rather than a guessed one.
+
+Those set-aside views are then treated differently depending on what is being
+asked. The calendar's day colour and the transition graph both step over them —
+one asks what a day was *about*, the other what followed what on the main
+lane, and background must not vote in either. The topic tree counts them,
+because it asks what was watched.
 
 ## Honesty note on "time spent"
 

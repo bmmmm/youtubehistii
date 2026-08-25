@@ -2,13 +2,16 @@
 
 package report
 
-// The watch path page carries four views of one timeline, so it is assembled
+// The watch path page carries five views of one timeline, so it is assembled
 // from parts rather than written as one string: this file holds the shell —
-// markup, style, shared drawing helpers and the router — and the two view
-// files hold the drawing. A single file with all four would be unreadable,
-// and the seams here are the same seams the page has.
+// markup, style, shared drawing helpers, the router and the flat list — and
+// four drawing files hold the rest. watchpath_overview.go has the calendar and
+// the transition graph, watchpath_detail.go the day and the sitting,
+// watchpath_cluster.go the topic tree, watchpath_intro.go the entry cards. One
+// file with all of it would be unreadable, and the seams here are the seams
+// the page itself has.
 //
-// Two rules bind every part, including the view files:
+// Two rules bind every part, including the drawing files:
 //
 //   - No backticks and no "{{" outside a real template action. The whole page
 //     is one Go raw string literal that html/template parses.
@@ -217,7 +220,7 @@ so an evening that runs past midnight stays on that evening.
 <div id="tip" hidden></div>
 `
 
-// coreJS is everything the four views share: the payload, the small format
+// coreJS is everything every view shares: the payload, the small format
 // helpers, the card the list and the session view both draw, and the router.
 const coreJS = `<script>
 // Assigned in a plain script element on purpose: html/template only treats
