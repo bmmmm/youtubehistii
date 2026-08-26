@@ -13,5 +13,10 @@ data/
 # Real config may contain personal channel names — track only the example.
 /config/rules.yaml
 
+# The generated taxonomy lists the user's real subjects — a profile of a
+# person. The control file steers it and names the same subjects.
+/config/taxonomy.yaml
+/config/taxonomy-control.yaml
+
 # Working notes stay local (never on the public mirror)
 /TODO.md

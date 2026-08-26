@@ -17,12 +17,18 @@ import (
 func cmdReport(args []string) error {
 	fs, dataDir := newFlagSet("report")
 	noNames := fs.Bool("no-names", false, "terminal summary without channel/subscription names (aggregates and topics only, safe to paste)")
+	useTaxonomy := fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before aggregating")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
 	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
 	if err != nil {
 		return fmt.Errorf("read classified views (run \"classify\" first): %w", err)
+	}
+	if *useTaxonomy {
+		if err := foldThroughTaxonomy(rows); err != nil {
+			return err
+		}
 	}
 	subs, err := readJSONL[takeout.Subscription](p.subscriptionsJSONL())
 	if err != nil && !errors.Is(err, os.ErrNotExist) {

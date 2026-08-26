@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/taxonomy"
 )
 
 // paths centralizes every file the pipeline reads or writes, so each stage
@@ -23,6 +26,7 @@ func (p paths) subscriptionsCSV() string   { return filepath.Join(p.dataDir, "su
 func (p paths) subscriptionsJSONL() string { return filepath.Join(p.dataDir, "subscriptions.jsonl") }
 func (p paths) metaCacheDir() string       { return filepath.Join(p.dataDir, "cache", "meta") }
 func (p paths) classifyCache() string      { return filepath.Join(p.dataDir, "cache", "classify") }
+func (p paths) embedCacheDir() string      { return filepath.Join(p.dataDir, "cache", "embed") }
 func (p paths) classifiedJSONL() string {
 	return filepath.Join(p.dataDir, "classified.jsonl")
 }
@@ -96,6 +100,21 @@ func loadNewCacheEntries[T any](dir string, seen map[string]bool) (map[string]T,
 		seen[name] = true
 	}
 	return out, nil
+}
+
+// foldThroughTaxonomy projects every verdict's topic through the generated
+// taxonomy — the read-side application of "youtubehistii taxonomy", right
+// after readJSONL and before any aggregate sees the rows. The aggregates
+// themselves stay untouched, so old and new view are one flag apart.
+func foldThroughTaxonomy(rows []classify.Verdict) error {
+	t, err := taxonomy.LoadFile(taxonomyPath)
+	if err != nil {
+		return fmt.Errorf("read %s (run \"taxonomy\" first): %w", taxonomyPath, err)
+	}
+	for i := range rows {
+		rows[i].Topic = t.Fold(rows[i].Topic)
+	}
+	return nil
 }
 
 // readJSONL reads one JSON document per line.

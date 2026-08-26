@@ -151,6 +151,68 @@ func (c *Client) ChatMax(system, user string, maxTokens int) (string, error) {
 	return cr.Choices[0].Message.Content, nil
 }
 
+type embedRequest struct {
+	Model string   `json:"model"`
+	Input []string `json:"input"`
+}
+
+type embedResponse struct {
+	Data []struct {
+		Index     int       `json:"index"`
+		Embedding []float32 `json:"embedding"`
+	} `json:"data"`
+}
+
+// Embed returns one vector per input text, in input order. The server chunks
+// internally (embedding_batch_size), so callers pick the request size for
+// progress granularity, not for the engine.
+func (c *Client) Embed(model string, input []string) ([][]float32, error) {
+	body, err := json.Marshal(embedRequest{Model: model, Input: input})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	}
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("oMLX unreachable at %s (start it with \"omlx serve\"): %w", c.BaseURL, err)
+	}
+	defer resp.Body.Close()
+	// Embeddings are big: 32 texts × 1024 dims × ~20 bytes of JSON per float
+	// blows through the 1 MB cap the chat path uses.
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case resp.StatusCode == http.StatusUnauthorized:
+		return nil, fmt.Errorf("oMLX rejected the request (401) — set OMLX_API_KEY")
+	case resp.StatusCode != http.StatusOK:
+		return nil, fmt.Errorf("oMLX HTTP %d: %s", resp.StatusCode, truncate(string(respBody), 200))
+	}
+	var er embedResponse
+	if err := json.Unmarshal(respBody, &er); err != nil {
+		return nil, fmt.Errorf("parse oMLX embeddings: %w", err)
+	}
+	if len(er.Data) != len(input) {
+		return nil, fmt.Errorf("oMLX returned %d embeddings for %d inputs", len(er.Data), len(input))
+	}
+	out := make([][]float32, len(input))
+	for _, d := range er.Data {
+		if d.Index < 0 || d.Index >= len(input) || out[d.Index] != nil {
+			return nil, fmt.Errorf("oMLX embedding index %d invalid or duplicated", d.Index)
+		}
+		out[d.Index] = d.Embedding
+	}
+	return out, nil
+}
+
 // Models lists the model IDs the server offers (also a cheap health check).
 func (c *Client) Models() ([]string, error) {
 	req, err := http.NewRequest(http.MethodGet, c.BaseURL+"/models", nil)

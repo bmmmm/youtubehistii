@@ -51,7 +51,18 @@ Usage:
                                   distribution and creator tags, to decide the
                                   taxonomy from the data (flags: -tags,
                                   -tags-per-category 15; read-only, no LLM)
+  youtubehistii taxonomy          derive a data-driven taxonomy from the classified corpus:
+                                  embed every observed area/sub label (with channel/tag
+                                  context), cluster at two thresholds, name the clusters,
+                                  refine in rounds -> config/taxonomy.yaml. Verdicts stay
+                                  untouched; report/watchpath apply it on read via
+                                  -taxonomy. Steer a running loop through
+                                  config/taxonomy-control.yaml, watch it in
+                                  data/out/taxonomy-run.jsonl. Flags: -embed-model bge-m3,
+                                  -fine 0.35, -coarse 0.60, -min-videos 3, -rounds 5,
+                                  -no-llm, -probe (measure server latency, change nothing)
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
+                                  (-taxonomy: project topics through config/taxonomy.yaml)
   youtubehistii watchpath         render data/out/watchpath.html: the same views along the
                                   time axis — sittings split by a 30 min gap, newest first,
                                   with what the gap to the next start suggests about each
@@ -83,6 +94,8 @@ func main() {
 		err = cmdRun(args)
 	case "inspect":
 		err = cmdInspect(args)
+	case "taxonomy":
+		err = cmdTaxonomy(args)
 	case "report":
 		err = cmdReport(args)
 	case "watchpath":

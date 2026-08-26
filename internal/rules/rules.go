@@ -208,6 +208,11 @@ func (c *Config) ReplaceArea(topic, area string) string {
 // rather than rejected.
 func slugifySub(s string) string { return slugify(s, subMaxLen) }
 
+// SlugifySub is slugifySub for other packages: the taxonomy builder names
+// clusters with it so a generated subject can never spell a slug this package
+// would normalize differently.
+func SlugifySub(s string) string { return slugifySub(s) }
+
 // slugify lowercases to [a-z0-9-] with no repeated or edge dashes; anything
 // else (spaces, punctuation, ampersands, slashes, non-ASCII) acts as a
 // separator. maxLen 0 means no cap — area ids must never be truncated, only

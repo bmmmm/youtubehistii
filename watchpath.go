@@ -17,12 +17,18 @@ import (
 // report.html answers what was watched, this one answers how.
 func cmdWatchPath(args []string) error {
 	fs, dataDir := newFlagSet("watchpath")
+	useTaxonomy := fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
 	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
 	if err != nil {
 		return fmt.Errorf("read classified views (run \"classify\" first): %w", err)
+	}
+	if *useTaxonomy {
+		if err := foldThroughTaxonomy(rows); err != nil {
+			return err
+		}
 	}
 	path := report.BuildPath(rows)
 
