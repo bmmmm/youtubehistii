@@ -184,24 +184,34 @@ func probeRun(client *omlx.Client, embedModel string, p paths) error {
 		}
 	}
 
+	// Each half is measured even when the other is missing: a server without
+	// the embedding model still yields a real chat number, and the probe's
+	// job is to report everything it can, not to stop at the first gap.
 	texts := make([]string, 32)
 	for i := range texts {
 		texts[i] = fmt.Sprintf("topic: sample subject %d\nchannels: alpha channel, beta media, gamma tv\n"+
 			"tags: music, live, concert, tour, interview\ntitles: a sample video title %d | another sample title", i, i)
 	}
+	var embedBatch time.Duration
 	t0 := time.Now()
 	if _, err := client.Embed(embedModel, texts); err != nil {
-		return fmt.Errorf("embedding probe: %w", err)
+		fmt.Printf("embed: FAILED — %v\n", err)
+	} else {
+		embedBatch = time.Since(t0)
+		fmt.Printf("embed: 32 texts in %s (%.0f ms/text)\n", embedBatch.Round(time.Millisecond), float64(embedBatch.Milliseconds())/32)
 	}
-	embedBatch := time.Since(t0)
-	fmt.Printf("embed: 32 texts in %s (%.0f ms/text)\n", embedBatch.Round(time.Millisecond), float64(embedBatch.Milliseconds())/32)
 
+	var chatReq time.Duration
 	t0 = time.Now()
 	if _, err := client.ChatMax("Reply with the single word: ok", "ok?", 8); err != nil {
-		return fmt.Errorf("chat probe: %w", err)
+		fmt.Printf("chat:  FAILED — %v\n", err)
+	} else {
+		chatReq = time.Since(t0)
+		fmt.Printf("chat:  1 request in %s\n", chatReq.Round(time.Millisecond))
 	}
-	chatReq := time.Since(t0)
-	fmt.Printf("chat:  1 request in %s\n", chatReq.Round(time.Millisecond))
+	if embedBatch == 0 || chatReq == 0 {
+		return fmt.Errorf("probe incomplete — fix the failures above and rerun")
+	}
 
 	// Real label count when the data is there; the planning estimate if not.
 	nLabels := 2000
