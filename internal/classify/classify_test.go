@@ -464,6 +464,46 @@ func TestParseBatchAcceptsObservedFieldLayouts(t *testing.T) {
 	}
 }
 
+func TestParseBatchSplitsAGluedMode(t *testing.T) {
+	// "1 gaming/factorio-consume 0.9" — the fourth observed layout: the mode
+	// glued onto the sub with a dash instead of a space. Before the split,
+	// the whole slug passed as a topic and the mode label became part of the
+	// sub name (24 such rows shipped, mode empty).
+	cfg := testConfig()
+	got, err := ParseBatchVerdicts(cfg, []string{"a"}, "1 gaming/factorio-consume 0.9")
+	if err != nil {
+		t.Fatalf("decidable layout refused: %v", err)
+	}
+	if v := got["a"]; v.Topic != "gaming/factorio" || v.Mode != "consume" {
+		t.Errorf("got %+v, want gaming/factorio with mode consume", v)
+	}
+
+	// A dashed sub whose suffix is no mode word stays whole.
+	got, err = ParseBatchVerdicts(cfg, []string{"a"}, "1 gaming/counter-strike 0.9")
+	if err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	if v := got["a"]; v.Topic != "gaming/counter-strike" || v.Mode != "" {
+		t.Errorf("got %+v, want the dashed sub kept whole", v)
+	}
+
+	// A glued "unclear" is no mode — parseMode maps it to the empty mode,
+	// so stripping it would invent a subject the model never named.
+	got, err = ParseBatchVerdicts(cfg, []string{"a"}, "1 gaming/factorio-unclear 0.9")
+	if err != nil {
+		t.Fatalf("refused: %v", err)
+	}
+	if v := got["a"]; v.Topic != "gaming/factorio-unclear" {
+		t.Errorf("got %+v, want the slug left alone", v)
+	}
+
+	// No sub, no split: a bare area with a dashed mode has two readings and
+	// stays refused.
+	if _, err := ParseBatchVerdicts(cfg, []string{"a"}, "1 gaming-consume 0.9"); err == nil {
+		t.Error("bare-area glued mode was accepted")
+	}
+}
+
 func TestParseBatchStillRefusesAmbiguousLines(t *testing.T) {
 	cfg := testConfig()
 	// Five fields, but position 4 is not a mode — there is no single reading,

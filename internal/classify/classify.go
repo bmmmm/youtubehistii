@@ -229,6 +229,15 @@ func normalizeFields(cfg *rules.Config, fields []string) []string {
 			}
 		}
 	case 3:
+		// "1 gaming/factorio-consume 0.9" — the mode glued onto the sub with a
+		// dash instead of a space, the fourth observed layout. Decidable: the
+		// piece after the LAST dash is exactly a mode word and what remains is
+		// still "area/sub". It must run before the whole-topic reading below,
+		// which would happily accept the glued slug — that is how the mode
+		// label ended up inside 24 sub names.
+		if base, mode, ok := splitGluedMode(cfg, fields[1]); ok && isConfidence(fields[2]) {
+			return []string{fields[0], base, mode, fields[2]}
+		}
 		// Covers the older observed short form "1 unclear 0.1" as the special
 		// case it always was: "unclear" is a topic like any other.
 		if _, ok := cfg.NormalizeTopic(fields[1]); ok && isConfidence(fields[2]) {
@@ -236,6 +245,27 @@ func normalizeFields(cfg *rules.Config, fields []string) []string {
 		}
 	}
 	return fields
+}
+
+// splitGluedMode splits "area/sub-consume" into "area/sub" and "consume".
+// Only a dash INSIDE the sub qualifies: a bare "gaming-consume" has no sub
+// the mode could have glued onto, and reading its dash as a separator would
+// be a guess. "unclear" never splits — parseMode maps it to the empty mode,
+// and stripping it would silently invent a subject.
+func splitGluedMode(cfg *rules.Config, topic string) (base, mode string, ok bool) {
+	slash := strings.Index(topic, "/")
+	dash := strings.LastIndex(topic, "-")
+	if slash < 0 || dash < slash+2 {
+		return "", "", false
+	}
+	m, modeOK := parseMode(topic[dash+1:])
+	if !modeOK || m == "" {
+		return "", "", false
+	}
+	if _, topicOK := cfg.NormalizeTopic(topic[:dash]); !topicOK {
+		return "", "", false
+	}
+	return topic[:dash], m, true
 }
 
 func isConfidence(s string) bool {
