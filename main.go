@@ -58,9 +58,10 @@ Usage:
                                   untouched; report/watchpath apply it on read via
                                   -taxonomy. Steer a running loop through
                                   config/taxonomy-control.yaml, watch it in
-                                  data/out/taxonomy-run.jsonl. Flags: -embed-model bge-m3,
-                                  -fine 0.35, -coarse 0.60, -min-videos 3, -rounds 5,
-                                  -no-llm, -probe (measure server latency, change nothing)
+                                  data/out/taxonomy-run.jsonl. Flags: -embed-model
+                                  bge-m3-mlx-fp16, -fine 0.35, -coarse 0.60, -min-videos 3,
+                                  -rounds 5, -no-llm, -probe (measure server latency,
+                                  change nothing)
   youtubehistii report            render data/out/report.html + report.csv + terminal summary
                                   (-taxonomy: project topics through config/taxonomy.yaml)
   youtubehistii watchpath         render data/out/watchpath.html: the same views along the

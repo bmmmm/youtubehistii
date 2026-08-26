@@ -31,7 +31,7 @@ const (
 func cmdTaxonomy(args []string) error {
 	fs, dataDir := newFlagSet("taxonomy")
 	rulesPath := fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)")
-	embedModel := fs.String("embed-model", "bge-m3", "embedding model on the oMLX server (multilingual, so chess and schach meet)")
+	embedModel := fs.String("embed-model", "bge-m3-mlx-fp16", "embedding model on the oMLX server (multilingual, so chess and schach meet)")
 	fine := fs.Float64("fine", 0.35, "cosine-distance threshold for subjects (smaller = more, tighter clusters)")
 	coarse := fs.Float64("coarse", 0.60, "cosine-distance threshold for the top level")
 	minVideos := fs.Int("min-videos", 3, "fold subjects with fewer unique videos into their nearest neighbor")
