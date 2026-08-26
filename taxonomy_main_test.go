@@ -21,7 +21,7 @@ import (
 // a model list, embeddings with two hand-made axes (jazz vs. chess — the
 // fixtures are illustrations, not anyone's history), and a namer whose
 // answers depend on the prompt's altitude.
-func fakeOMLX(t *testing.T) *httptest.Server {
+func fakeOMLX(t *testing.T, chatCalls *int) *httptest.Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"data":[{"id":"test-chat"},{"id":"test-embed"}]}`)
@@ -53,6 +53,7 @@ func fakeOMLX(t *testing.T) *httptest.Server {
 		json.NewEncoder(w).Encode(out)
 	})
 	mux.HandleFunc("/v1/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		*chatCalls++
 		var req struct {
 			Messages []struct {
 				Content string `json:"content"`
@@ -75,7 +76,8 @@ func fakeOMLX(t *testing.T) *httptest.Server {
 }
 
 func TestCmdTaxonomyEndToEnd(t *testing.T) {
-	srv := fakeOMLX(t)
+	var chatCalls int
+	srv := fakeOMLX(t, &chatCalls)
 	defer srv.Close()
 
 	// The taxonomy and its run log land relative to the working directory,
@@ -136,7 +138,13 @@ func TestCmdTaxonomyEndToEnd(t *testing.T) {
 		}
 	}
 
-	// The embed cache makes the second run free: rerun and count requests.
+	// Both caches make the second run free: rerun and count requests. This is
+	// the run shape the control file asks for — edit, run the same command
+	// again — so a rerun must not pay the server twice.
+	firstRunChats := chatCalls
+	if firstRunChats == 0 {
+		t.Fatal("first run never asked the model to name anything")
+	}
 	if err := cmdTaxonomy([]string{"-data", dataDir, "-rules", rulesPath, "-min-videos", "1", "-rounds", "1"}); err != nil {
 		t.Fatalf("second run: %v", err)
 	}
@@ -146,5 +154,21 @@ func TestCmdTaxonomyEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(logBytes), `"fresh":0`) {
 		t.Error("second run embedded fresh vectors — the cache did not hold")
+	}
+	if chatCalls != firstRunChats {
+		t.Errorf("second run made %d naming requests, want 0 — the name cache did not hold",
+			chatCalls-firstRunChats)
+	}
+
+	// A different chat model must not read the first model's names.
+	otherRules := filepath.Join(dataDir, "rules-other.yaml")
+	if err := os.WriteFile(otherRules, []byte(strings.Replace(rulesYAML, "test-chat", "other-chat", 1)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmdTaxonomy([]string{"-data", dataDir, "-rules", otherRules, "-min-videos", "1", "-rounds", "1"}); err != nil {
+		t.Fatalf("third run: %v", err)
+	}
+	if chatCalls == firstRunChats {
+		t.Error("a different chat model reused the cached names — the model is not in the key")
 	}
 }

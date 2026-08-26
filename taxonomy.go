@@ -53,6 +53,8 @@ func cmdTaxonomy(args []string) error {
 		return probeRun(client, *embedModel, p)
 	}
 
+	timer := newPhaseTimer()
+
 	// Collect: classified.jsonl + meta cache -> labels. Purely local.
 	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
 	if err != nil {
@@ -90,6 +92,7 @@ func cmdTaxonomy(args []string) error {
 	log.event("baseline", baseline)
 	fmt.Printf("collected %d labels from %d views\n", len(labels), len(views))
 	fmt.Printf("baseline   %s\n", metricsLine(baseline))
+	timer.mark("collect")
 
 	// Embed: one vector per label, batched, cached under data/cache/embed so
 	// the second run is free.
@@ -99,8 +102,9 @@ func cmdTaxonomy(args []string) error {
 	}
 	log.event("embed", map[string]any{"model": *embedModel, "fresh": fresh, "cached": len(labels) - fresh})
 	fmt.Printf("embedded %d labels (%d fresh, %d from cache)\n", len(labels), fresh, len(labels)-fresh)
+	timer.mark("embed")
 
-	namer := newNamer(client, *noLLM, log)
+	namer := newNamer(client, *noLLM, log, p.nameCacheDir())
 	opts := taxonomy.RefineOpts{
 		SplitAt:    *fine * 0.7,
 		MaxRadius:  *maxRadius,
@@ -114,11 +118,15 @@ func cmdTaxonomy(args []string) error {
 		return err
 	}
 	subjects := taxonomy.ClusterLabels(labels, vecs, *fine)
+	timer.mark("cluster")
 	fmt.Printf("clustered into %d subjects at threshold %.2f\n", len(subjects), *fine)
 	subjects = taxonomy.FoldSmall(subjects, *minVideos, ctl.KeepSet())
+	timer.mark("fold")
 	nameSubjects(subjects, namer, true)
+	timer.mark("name")
 	subjects = taxonomy.MergeSameNames(subjects)
 	assignParents(subjects, *coarse, namer)
+	timer.mark("coarse")
 
 	last := taxonomy.Measure(subjects, *tailN)
 	log.event("round", map[string]any{"n": 1, "metrics": last})
@@ -143,6 +151,7 @@ func cmdTaxonomy(args []string) error {
 		assignParents(subjects, *coarse, namer)
 
 		m := taxonomy.Measure(subjects, *tailN)
+		timer.mark(fmt.Sprintf("round-%d", round))
 		log.event("round", map[string]any{"n": round, "metrics": m, "changes": changes})
 		fmt.Printf("round %d    %s\n", round, metricsLine(m))
 		for _, c := range biggestChanges(changes, 8) {
@@ -162,14 +171,36 @@ func cmdTaxonomy(args []string) error {
 	}); err != nil {
 		return err
 	}
+	timer.mark("write")
 	log.event("write", map[string]any{"path": taxonomyPath, "subjects": len(subjects), "tops": last.Tops})
+	log.event("timing", timer.spans)
 	fmt.Printf("wrote %s (%d subjects under %d top levels)\n", taxonomyPath, len(subjects), last.Tops)
+	fmt.Printf("timing     %s\n", timer.line())
 	fmt.Println("compare with: youtubehistii report -taxonomy / watchpath -taxonomy")
 	return nil
 }
 
+// warmThenTime runs the same call twice and returns both durations. oMLX
+// swaps models under memory pressure, so a single cold call measures the
+// load, not the throughput: the same 32-text batch came back at 30 ms/text
+// warm and 1314 ms/text right after a model change, which flipped the hour
+// verdict to false. The first number is real — it is just paid once per
+// phase, not per batch — so it is reported rather than hidden.
+func warmThenTime(call func() error) (load, measured time.Duration, err error) {
+	t0 := time.Now()
+	if err = call(); err != nil {
+		return 0, 0, err
+	}
+	load = time.Since(t0)
+	t0 = time.Now()
+	if err = call(); err != nil {
+		return load, 0, err
+	}
+	return load, time.Since(t0), nil
+}
+
 // probeRun is step 0 made executable: whether the models are there, what one
-// embedding batch and one chat request cost, and what that means for the
+// embedding batch and one chat request cost warm, and what that means for the
 // hour budget. The client resolves OMLX_URL/OMLX_API_KEY itself (.env
 // fallback), so no secret ever appears on a command line.
 func probeRun(client *omlx.Client, embedModel string, p paths) error {
@@ -192,22 +223,26 @@ func probeRun(client *omlx.Client, embedModel string, p paths) error {
 		texts[i] = fmt.Sprintf("topic: sample subject %d\nchannels: alpha channel, beta media, gamma tv\n"+
 			"tags: music, live, concert, tour, interview\ntitles: a sample video title %d | another sample title", i, i)
 	}
-	var embedBatch time.Duration
-	t0 := time.Now()
-	if _, err := client.Embed(embedModel, texts); err != nil {
+	embedLoad, embedBatch, err := warmThenTime(func() error {
+		_, e := client.Embed(embedModel, texts)
+		return e
+	})
+	if err != nil {
 		fmt.Printf("embed: FAILED — %v\n", err)
 	} else {
-		embedBatch = time.Since(t0)
-		fmt.Printf("embed: 32 texts in %s (%.0f ms/text)\n", embedBatch.Round(time.Millisecond), float64(embedBatch.Milliseconds())/32)
+		fmt.Printf("embed: 32 texts in %s warm (%.0f ms/text), first call %s\n",
+			embedBatch.Round(time.Millisecond), float64(embedBatch.Milliseconds())/32, embedLoad.Round(time.Millisecond))
 	}
 
-	var chatReq time.Duration
-	t0 = time.Now()
-	if _, err := client.ChatMax("Reply with the single word: ok", "ok?", 8); err != nil {
+	chatLoad, chatReq, err := warmThenTime(func() error {
+		_, e := client.ChatMax("Reply with the single word: ok", "ok?", 8)
+		return e
+	})
+	if err != nil {
 		fmt.Printf("chat:  FAILED — %v\n", err)
 	} else {
-		chatReq = time.Since(t0)
-		fmt.Printf("chat:  1 request in %s\n", chatReq.Round(time.Millisecond))
+		fmt.Printf("chat:  1 request in %s warm, first call %s\n",
+			chatReq.Round(time.Millisecond), chatLoad.Round(time.Millisecond))
 	}
 	if embedBatch == 0 || chatReq == 0 {
 		return fmt.Errorf("probe incomplete — fix the failures above and rerun")
@@ -226,7 +261,9 @@ func probeRun(client *omlx.Client, embedModel string, p paths) error {
 	nameCost := 300 * chatReq // cluster count is unknown before the run; 300 is generous
 	fmt.Printf("estimate for %d labels: embeddings ≈ %s, naming (at ~300 clusters, 5 rounds worst case) ≈ %s\n",
 		nLabels, embedCost.Round(time.Second), (5 * nameCost).Round(time.Second))
-	fmt.Printf("hour budget holds: %v\n", embedCost+5*nameCost < time.Hour)
+	fmt.Printf("server work fits the hour: %v — clustering runs locally and is NOT in that number;\n"+
+		"  \"taxonomy -no-llm -rounds 1\" measures it and prints the timing line\n",
+		embedCost+5*nameCost < time.Hour)
 	return nil
 }
 
@@ -297,11 +334,64 @@ func writeEmbedCache(dir, model, text string, v []float32) error {
 	return os.WriteFile(embedCachePath(dir, model, text), b, 0o644)
 }
 
+// nameCachePath keys a naming reply by the whole prompt plus the model that
+// answered it — the same shape as embedCachePath, one directory over.
+func nameCachePath(dir, model, system, user string) string {
+	sum := sha256.Sum256([]byte(model + "\x00" + system + "\x00" + user))
+	return filepath.Join(dir, hex.EncodeToString(sum[:12])+".json")
+}
+
+func readNameCache(dir, model, system, user string) (string, bool) {
+	if dir == "" {
+		return "", false
+	}
+	b, err := os.ReadFile(nameCachePath(dir, model, system, user))
+	if err != nil {
+		return "", false
+	}
+	var e struct {
+		Reply string `json:"reply"`
+	}
+	if json.Unmarshal(b, &e) != nil || e.Reply == "" {
+		return "", false
+	}
+	return e.Reply, true
+}
+
+// writeNameCache drops a failed write: the run has the name it needs, and the
+// next one simply asks the model again.
+func writeNameCache(dir, model, system, user, reply string) {
+	if dir == "" {
+		return
+	}
+	b, err := json.Marshal(struct {
+		Reply string `json:"reply"`
+	}{reply})
+	if err != nil {
+		return
+	}
+	os.WriteFile(nameCachePath(dir, model, system, user), b, 0o644)
+}
+
 // newNamer returns the cluster-naming function: one chat request per cluster,
 // falling back to the strongest member's sub on any model trouble. kind is
 // "subject" or "top" and only changes the prompt's altitude.
-func newNamer(client *omlx.Client, noLLM bool, log *runLog) func(c taxonomy.Cluster, kind string) string {
+//
+// Replies are cached on disk under the prompt, because the intended way to
+// steer a run is to edit the control file and run the same command again —
+// and naming is the expensive half: a real corpus clusters into ~770
+// subjects, one request each. The cache key carries the chat model, so
+// swapping the model in rules.yaml (the answer to unusable names) bypasses it
+// on its own. To throw the names away deliberately, delete the directory.
+func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) func(c taxonomy.Cluster, kind string) string {
 	warned := false
+	// One mkdir up front: a cache that cannot exist costs speed, not the run.
+	if !noLLM {
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: name cache unusable (%v) — every rerun will pay the model again\n", err)
+			cacheDir = ""
+		}
+	}
 	return func(c taxonomy.Cluster, kind string) string {
 		fallback := taxonomy.FallbackName(c)
 		if noLLM {
@@ -327,14 +417,22 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog) func(c taxonomy.Clus
 		if ch := c.TopChannels(5); len(ch) > 0 {
 			u.WriteString("channels: " + strings.Join(ch, ", ") + "\n")
 		}
-		reply, err := client.ChatMax(system, u.String(), 24)
-		if err != nil {
-			if !warned {
-				fmt.Fprintf(os.Stderr, "warning: naming via LLM failed (%v) — falling back to member names\n", err)
-				warned = true
+		user := u.String()
+		// The raw reply is what gets cached, not the slug: slugging stays a
+		// code decision that a later change may revise, the reply is the
+		// model's answer and does not move.
+		reply, cached := readNameCache(cacheDir, client.Model, system, user)
+		if !cached {
+			var err error
+			if reply, err = client.ChatMax(system, user, 24); err != nil {
+				if !warned {
+					fmt.Fprintf(os.Stderr, "warning: naming via LLM failed (%v) — falling back to member names\n", err)
+					warned = true
+				}
+				log.event("name-fallback", map[string]any{"cluster": fallback, "error": err.Error()})
+				return fallback
 			}
-			log.event("name-fallback", map[string]any{"cluster": fallback, "error": err.Error()})
-			return fallback
+			writeNameCache(cacheDir, client.Model, system, user, reply)
 		}
 		slug := rules.SlugifySub(reply)
 		if slug == "" {
@@ -384,6 +482,44 @@ func biggestChanges(changes []taxonomy.Change, n int) []taxonomy.Change {
 func metricsLine(m taxonomy.Metrics) string {
 	return fmt.Sprintf("subjects %d under %d tops | spread %d | tail %.0f%% | chan mean %.1f max %d | coherence %.3f",
 		m.Subjects, m.Tops, m.Spread, 100*m.TailShare, m.ChanMean, m.ChanMax, m.Coherence)
+}
+
+// phaseTimer records how long each stage took. The probe can only estimate
+// the two server-side costs; the clustering that sits between them never
+// appeared in any estimate, so the run itself has to say where its time went.
+type phaseTimer struct {
+	last  time.Time
+	spans []phaseSpan
+}
+
+type phaseSpan struct {
+	Phase string `json:"phase"`
+	MS    int64  `json:"ms"`
+}
+
+func newPhaseTimer() *phaseTimer { return &phaseTimer{last: time.Now()} }
+
+// mark closes the span that started at the previous mark. Stages are
+// sequential, so one call per boundary is the whole bookkeeping.
+func (t *phaseTimer) mark(phase string) {
+	now := time.Now()
+	t.spans = append(t.spans, phaseSpan{Phase: phase, MS: now.Sub(t.last).Milliseconds()})
+	t.last = now
+}
+
+// line renders the spans for the terminal, skipping anything under 50 ms —
+// the point is which stage dominates, not a full accounting.
+func (t *phaseTimer) line() string {
+	var parts []string
+	var total int64
+	for _, s := range t.spans {
+		total += s.MS
+		if s.MS >= 50 {
+			parts = append(parts, fmt.Sprintf("%s %.1fs", s.Phase, float64(s.MS)/1000))
+		}
+	}
+	parts = append(parts, fmt.Sprintf("total %.1fs", float64(total)/1000))
+	return strings.Join(parts, " | ")
 }
 
 // runLog appends one JSON line per event to data/out/taxonomy-run.jsonl —

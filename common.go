@@ -27,6 +27,7 @@ func (p paths) subscriptionsJSONL() string { return filepath.Join(p.dataDir, "su
 func (p paths) metaCacheDir() string       { return filepath.Join(p.dataDir, "cache", "meta") }
 func (p paths) classifyCache() string      { return filepath.Join(p.dataDir, "cache", "classify") }
 func (p paths) embedCacheDir() string      { return filepath.Join(p.dataDir, "cache", "embed") }
+func (p paths) nameCacheDir() string       { return filepath.Join(p.dataDir, "cache", "name") }
 func (p paths) classifiedJSONL() string {
 	return filepath.Join(p.dataDir, "classified.jsonl")
 }
