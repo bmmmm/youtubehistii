@@ -177,7 +177,7 @@ func TestOverlapNeedsAllThreeConditions(t *testing.T) {
 }
 
 func TestRabbitHoleChains(t *testing.T) {
-	// Four cycling videos back to back — a chain.
+	// Four videos on one area back to back — a chain.
 	four := flat(BuildPath([]classify.Verdict{
 		view(0, "sports", 300),
 		view(6*time.Minute, "sports", 300),

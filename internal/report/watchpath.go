@@ -271,8 +271,8 @@ func markOverlap(vs []PathView) {
 
 // markRabbitHoles marks runs of rabbitMinLen or more main-lane views on one
 // area with short gaps between them. Overlap views are skipped rather than
-// breaking the chain — background music does not end a chain of cycling
-// videos, it just is not part of it.
+// breaking the chain — background music does not end a chain of videos on
+// one subject, it just is not part of it.
 func markRabbitHoles(vs []PathView) {
 	main := make([]int, 0, len(vs))
 	for i := range vs {

@@ -204,7 +204,7 @@ func TestFoldSmallFoldsIntoNearest(t *testing.T) {
 	}
 }
 
-// The shape that made "subject-b" a top level of one subject and three views:
+// The shape that made a stray a top level of one subject and three views:
 // a subject sitting far enough from everything else forms a coarse group of
 // its own, and nothing used to stop that group from becoming a section.
 func TestFoldSmallGroupsAbsorbsAStraySection(t *testing.T) {
@@ -216,10 +216,10 @@ func TestFoldSmallGroupsAbsorbsAStraySection(t *testing.T) {
 		return c
 	}
 	cs := []Cluster{
-		mk("cycling", lab("sports", "cycling", 200), []float32{1, 0, 0}),
-		mk("subject-d", lab("sports", "subject-d", 120), []float32{0.98, 0.2, 0}),
-		mk("subject-a", lab("music", "subject-a", 300), []float32{0, 1, 0}),
-		mk("subject-b", lab("sports", "subject-b", 3), []float32{0.7, 0.05, 0.7}),
+		mk("x-big", lab("area-x", "x-big", 200), []float32{1, 0, 0}),
+		mk("x-mid", lab("area-x", "x-mid", 120), []float32{0.98, 0.2, 0}),
+		mk("y-big", lab("area-y", "y-big", 300), []float32{0, 1, 0}),
+		mk("x-stray", lab("area-x", "x-stray", 3), []float32{0.7, 0.05, 0.7}),
 	}
 	groups := [][]int{{0, 1}, {2}, {3}}
 
@@ -227,12 +227,12 @@ func TestFoldSmallGroupsAbsorbsAStraySection(t *testing.T) {
 	if len(folded) != 2 {
 		t.Fatalf("got %d groups, want 2 — the stray should not stay a section: %v", len(folded), folded)
 	}
-	// It lands with sport, not with music: that is the whole point of folding
-	// by centroid rather than dropping it.
+	// It lands with its own family, not with the far one: that is the whole
+	// point of folding by centroid rather than dropping it.
 	var host []int
 	for _, g := range folded {
 		for _, i := range g {
-			if cs[i].Name == "subject-b" {
+			if cs[i].Name == "x-stray" {
 				host = g
 			}
 		}
@@ -241,16 +241,16 @@ func TestFoldSmallGroupsAbsorbsAStraySection(t *testing.T) {
 	for _, i := range host {
 		names[cs[i].Name] = true
 	}
-	if !names["cycling"] || !names["subject-d"] || names["subject-a"] {
-		t.Errorf("subject-b landed in the wrong section: %v", names)
+	if !names["x-big"] || !names["x-mid"] || names["y-big"] {
+		t.Errorf("the stray landed in the wrong section: %v", names)
 	}
 	// The subjects themselves are untouched — only the grouping moved.
-	if len(cs[3].Members) != 1 || cs[3].Name != "subject-b" {
+	if len(cs[3].Members) != 1 || cs[3].Name != "x-stray" {
 		t.Errorf("folding rewrote the subject: %+v", cs[3])
 	}
 
 	// A keep name protects its group.
-	kept := FoldSmallGroups(cs, groups, 25, map[string]bool{"subject-b": true})
+	kept := FoldSmallGroups(cs, groups, 25, map[string]bool{"x-stray": true})
 	if len(kept) != 3 {
 		t.Errorf("keep ignored: %d groups, want 3", len(kept))
 	}
@@ -268,14 +268,14 @@ func TestGroupPromptCarriesEveryCluster(t *testing.T) {
 		return newCluster([]Label{a, b}, [][]float32{va, vb})
 	}
 	cs := []Cluster{
-		mk(labCh("music", "subject-a", 100, "rapchan"), labCh("music", "subject-c", 40, "dnbchan"), []float32{1, 0, 0}, []float32{1, 0.1, 0}),
-		mk(labCh("music", "techno", 50, "techchan"), labCh("music", "reggae", 20, "regchan"), []float32{0, 1, 0}, []float32{0.1, 1, 0}),
-		mk(labCh("music", "band-a", 30, "punkchan"), labCh("music", "punk", 10, "punk2chan"), []float32{0, 0, 1}, []float32{0, 0.1, 1}),
+		mk(labCh("area-a", "a1", 100, "a1chan"), labCh("area-a", "a2", 40, "a2chan"), []float32{1, 0, 0}, []float32{1, 0.1, 0}),
+		mk(labCh("area-a", "b1", 50, "b1chan"), labCh("area-a", "b2", 20, "b2chan"), []float32{0, 1, 0}, []float32{0.1, 1, 0}),
+		mk(labCh("area-a", "c1", 30, "c1chan"), labCh("area-a", "c2", 10, "c2chan"), []float32{0, 0, 1}, []float32{0, 0.1, 1}),
 	}
 
 	// An empty cluster in the group is skipped, not carried as a member.
 	p := GroupPrompt(append(cs, Cluster{}), []int{0, 1, 2, 3})
-	if got, want := topics(p), []string{"music/subject-a", "music/techno", "music/band-a"}; !reflect.DeepEqual(got, want) {
+	if got, want := topics(p), []string{"area-a/a1", "area-a/b1", "area-a/c1"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("prompt members = %v, want the strongest label of each cluster %v", got, want)
 	}
 	if p.Views != 180 {
@@ -283,7 +283,7 @@ func TestGroupPromptCarriesEveryCluster(t *testing.T) {
 	}
 	// The channels a top-level prompt shows must come from the whole group;
 	// before, all five were the biggest subject's.
-	if got, want := p.TopChannels(5), []string{"rapchan", "techchan", "punkchan"}; !reflect.DeepEqual(got, want) {
+	if got, want := p.TopChannels(5), []string{"a1chan", "b1chan", "c1chan"}; !reflect.DeepEqual(got, want) {
 		t.Errorf("TopChannels = %v, want one channel from each cluster %v", got, want)
 	}
 

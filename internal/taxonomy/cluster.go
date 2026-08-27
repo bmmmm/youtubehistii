@@ -371,8 +371,8 @@ func Coarse(subjects []Cluster, threshold float64) [][]int {
 // the nearest group that clears it. Subjects have had this bar since the
 // beginning (FoldSmall, -min-videos); top levels had none, so a subject whose
 // centroid sat far enough from everything else became its own top level no
-// matter how small it was — "subject-b" was a top of one subject and three
-// views while its own label read sports/subject-b.
+// matter how small it was — one real run had a top level of a single subject
+// and three views, whose own label already named the section it belonged in.
 //
 // The subjects themselves are untouched: only the grouping changes, so a
 // folded stray keeps its own name and simply sits under a real section. Keep

@@ -30,7 +30,8 @@ type CategoryAgg struct {
 //
 // Channels is the same tag counted along the other axis — how many distinct
 // channels use it — and that is what separates a subject from a brand.
-// "creator-a" is frequent AND on one channel; "rust" is frequent across many.
+// A creator's own name is frequent AND on one channel; a subject like "rust"
+// is frequent across many.
 // Counted globally, never per category: a channel tag stays a channel tag
 // wherever it shows up.
 type TagCount struct {

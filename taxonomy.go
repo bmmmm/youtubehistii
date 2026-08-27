@@ -482,11 +482,12 @@ func (s *namingStats) line() string {
 // change the names, and through them the taxonomy: the same corpus that
 // settles at 188 subjects under 9 tops named one at a time came back as 198
 // under 11, and its biggest section — 64 subjects, 12751 views, music
-// included — was called "subject-a". That is precisely the failure
-// taxonomy.GroupPrompt was written to fix. Asking the tops singly did not
-// save it (still "subject-a"), because the damage is upstream: batched
-// subject names differ, MergeSameNames then merges different clusters, and
-// the coarse groups it feeds are no longer the same groups.
+// included — was named after one narrow part of itself. That is precisely
+// the failure taxonomy.GroupPrompt was written to fix. Asking the tops
+// singly did not save it (the same name came back), because the damage is
+// upstream: batched subject names differ, MergeSameNames then merges
+// different clusters, and the coarse groups it feeds are no longer the same
+// groups.
 //
 // So the speed is real and the cost is the output. Raise -name-batch when
 // the names do not matter and the run does — calibrating -fine/-coarse,
@@ -699,9 +700,9 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nam
 		// Top levels are always asked one at a time, whatever -name-batch
 		// says. There are only ever a handful of them — five of a cold run's
 		// 44 requests — so batching them buys almost nothing, and a batched
-		// run named the 12751-view section "section-a" over 64 subjects
-		// including music. A section name is the most visible name the run
-		// produces; it gets the prompt's whole attention.
+		// run named the 12751-view section, 64 subjects including music,
+		// after one narrow part of it. A section name is the most visible
+		// name the run produces; it gets the prompt's whole attention.
 		batchSize := 1
 		if kind != "top" {
 			batchSize = max(nameBatch, 1)
@@ -784,9 +785,9 @@ func nameSubjects(cs []taxonomy.Cluster, namer func([]taxonomy.Cluster, string) 
 func assignParents(cs []taxonomy.Cluster, coarse float64, minTopVideos int, keep map[string]bool, namer func([]taxonomy.Cluster, string) []string) {
 	groups := taxonomy.FoldSmallGroups(cs, taxonomy.Coarse(cs, coarse), minTopVideos, keep)
 	// The WHOLE group carries the naming prompt, one label per subject:
-	// naming it after its strongest subject alone called a top level of
-	// 31 music subjects "subject-a" and one of 29 sport subjects
-	// "cycling". TopChannels then sums across the group too.
+	// naming it after its strongest subject alone reduced a top level of
+	// 31 music subjects, and one of 29 sport subjects, to the name of that
+	// single subject. TopChannels then sums across the group too.
 	//
 	// All groups go in one call: a corpus has around ten top levels, which
 	// is under nameBatch, so a round that used to cost ten requests now
