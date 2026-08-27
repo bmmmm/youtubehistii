@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -132,16 +133,16 @@ func TestNamerCountsCacheHitsAndRequests(t *testing.T) {
 	}
 	defer log.close()
 
-	namer, stats := newNamer(client, false, log, t.TempDir())
+	namer, stats := newNamer(client, false, log, t.TempDir(), 1)
 	cluster := taxonomy.Cluster{
 		Members: []taxonomy.Label{{Area: "music", Sub: "jazz", Views: 3, Videos: 2}},
 		Views:   3,
 	}
 
-	if got := namer(cluster, "subject"); got != "jazz" {
+	if got := namer([]taxonomy.Cluster{cluster}, "subject")[0]; got != "jazz" {
 		t.Fatalf("first call = %q, want jazz", got)
 	}
-	if got := namer(cluster, "subject"); got != "jazz" {
+	if got := namer([]taxonomy.Cluster{cluster}, "subject")[0]; got != "jazz" {
 		t.Fatalf("second call = %q, want jazz", got)
 	}
 
@@ -174,9 +175,9 @@ func TestNamerCountsCacheHitsAndRequests(t *testing.T) {
 			return nil, fmt.Errorf("connection refused")
 		})},
 	}
-	failNamer, failStats := newNamer(failing, false, log, t.TempDir())
+	failNamer, failStats := newNamer(failing, false, log, t.TempDir(), 1)
 	other := taxonomy.Cluster{Members: []taxonomy.Label{{Area: "sports", Sub: "chess", Views: 1, Videos: 1}}}
-	if got, want := failNamer(other, "top"), "chess"; got != want {
+	if got, want := failNamer([]taxonomy.Cluster{other}, "top")[0], "chess"; got != want {
 		t.Fatalf("fallback = %q, want %q (the failing request's fallback name)", got, want)
 	}
 	if failStats.top.misses != 1 || failStats.top.fallbacks != 1 || failStats.top.hits != 0 {
@@ -202,10 +203,10 @@ func TestNamerNoLLMSkipsStats(t *testing.T) {
 	defer log.close()
 
 	// cacheDir does not even need to exist: -no-llm never touches it.
-	namer, stats := newNamer(nil, true, log, filepath.Join(t.TempDir(), "does-not-exist"))
+	namer, stats := newNamer(nil, true, log, filepath.Join(t.TempDir(), "does-not-exist"), 1)
 	cluster := taxonomy.Cluster{Members: []taxonomy.Label{{Area: "music", Sub: "jazz", Views: 1, Videos: 1}}}
 
-	if got := namer(cluster, "subject"); got != "jazz" {
+	if got := namer([]taxonomy.Cluster{cluster}, "subject")[0]; got != "jazz" {
 		t.Fatalf("got %q, want the fallback name jazz", got)
 	}
 	if *stats != (namingStats{}) {
@@ -405,5 +406,173 @@ func TestCmdTaxonomyEndToEnd(t *testing.T) {
 	}
 	if chatCalls == firstRunChats {
 		t.Error("a different chat model reused the cached names — the model is not in the key")
+	}
+}
+
+// nameBatchForTest is the batch size the batching tests run at. The shipped
+// default is 1 (see defaultNameBatch), so these tests have to ask for the
+// batched path explicitly — which is the point: the machinery must stay
+// correct for whoever raises the flag.
+const nameBatchForTest = 12
+
+// namedCluster builds a cluster whose prompt is distinguishable from the
+// others', so the cache cannot confuse two of them.
+func namedCluster(area, sub string, views int) taxonomy.Cluster {
+	return taxonomy.Cluster{
+		Members: []taxonomy.Label{{Area: area, Sub: sub, Views: views, Videos: views}},
+		Views:   views,
+	}
+}
+
+// TestParseNameBatchIsStrict pins the mapping guarantee. A name that lands on
+// the wrong cluster is invisible afterwards — it just reads as a badly named
+// subject — so anything less than a complete, unambiguous answer has to be
+// refused rather than patched up.
+func TestParseNameBatchIsStrict(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		reply string
+		n     int
+		want  []string // nil = expect an error
+	}{
+		{"clean", "1 jazz\n2 techno\n3 chess", 3, []string{"jazz", "techno", "chess"}},
+		{"out of order", "3 chess\n1 jazz\n2 techno", 3, []string{"jazz", "techno", "chess"}},
+		{"numbered with dots", "1. jazz\n2. techno", 2, []string{"jazz", "techno"}},
+		{"prose around it", "Sure!\n```\n1 jazz\n2 techno\n```\nHope that helps", 2, []string{"jazz", "techno"}},
+		{"missing one", "1 jazz\n2 techno", 3, nil},
+		{"duplicate number", "1 jazz\n1 techno\n3 chess", 3, nil},
+		{"number out of range", "1 jazz\n2 techno\n7 chess", 3, nil},
+		{"unusable slug", "1 jazz\n2 ---", 2, nil},
+		{"empty reply", "", 2, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseNameBatch(tc.reply, tc.n)
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("parsed %q into %v, want an error so the caller retries singly", tc.reply, got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseNameBatch(%q) = %v", tc.reply, err)
+			}
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestNamerBatchesAndStaysCacheCompatible is the whole point of batching in
+// one test: several clusters cost ONE request, the reply maps back by number
+// rather than by arrival order, and — the part that makes the change safe to
+// adopt — a second run finds every one of those names in the cache, because
+// they were stored under each cluster's own single-cluster prompt.
+func TestNamerBatchesAndStaysCacheCompatible(t *testing.T) {
+	cacheDir := t.TempDir()
+	var calls int
+	// Deliberately out of order: if the code trusted position instead of the
+	// number, this test would hand back chess/jazz/techno.
+	client := &omlx.Client{
+		BaseURL: "http://fake.invalid/v1",
+		Model:   "test-chat",
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			body := `{"choices":[{"message":{"content":"3 chess\n1 jazz\n2 techno"}}]}`
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+	log, err := newRunLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.close()
+
+	cs := []taxonomy.Cluster{
+		namedCluster("music", "bebop", 30),
+		namedCluster("music", "detroit", 20),
+		namedCluster("sports", "blitz", 10),
+	}
+	want := []string{"jazz", "techno", "chess"}
+
+	namer, stats := newNamer(client, false, log, cacheDir, nameBatchForTest)
+	got := namer(cs, "subject")
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("names = %v, want %v — the reply's numbers are the mapping", got, want)
+	}
+	if calls != 1 {
+		t.Errorf("three clusters cost %d requests, want 1", calls)
+	}
+	if stats.subject.misses != 3 || stats.subject.requests != 1 {
+		t.Errorf("stats = %d uncached in %d requests, want 3 in 1", stats.subject.misses, stats.subject.requests)
+	}
+
+	// The second run shares only the cache directory. If batching had cached
+	// under the batch prompt, none of these would be found.
+	namer2, stats2 := newNamer(client, false, log, cacheDir, nameBatchForTest)
+	got2 := namer2(cs, "subject")
+	if !reflect.DeepEqual(got2, want) {
+		t.Errorf("second run names = %v, want %v", got2, want)
+	}
+	if calls != 1 {
+		t.Errorf("second run sent %d more requests, want 0 — batched names must be cache-compatible", calls-1)
+	}
+	if stats2.subject.hits != 3 || stats2.subject.requests != 0 {
+		t.Errorf("second run = %d hits in %d requests, want 3 in 0", stats2.subject.hits, stats2.subject.requests)
+	}
+}
+
+// TestNamerRetriesABadBatchSingly locks in the fallback: a reply that does
+// not account for every cluster is thrown away whole — never partially
+// used — and each cluster is asked on its own instead.
+func TestNamerRetriesABadBatchSingly(t *testing.T) {
+	var calls int
+	client := &omlx.Client{
+		BaseURL: "http://fake.invalid/v1",
+		Model:   "test-chat",
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			calls++
+			// The batch answer covers two of the three asked for; every
+			// later (single) request answers "solo".
+			content := "solo"
+			if calls == 1 {
+				content = "1 jazz\n2 techno"
+			}
+			body := fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, content)
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(body)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+	log, err := newRunLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.close()
+
+	cs := []taxonomy.Cluster{
+		namedCluster("music", "bebop", 30),
+		namedCluster("music", "detroit", 20),
+		namedCluster("sports", "blitz", 10),
+	}
+	namer, stats := newNamer(client, false, log, t.TempDir(), nameBatchForTest)
+	got := namer(cs, "subject")
+
+	for i, name := range got {
+		if name != "solo" {
+			t.Errorf("cluster %d = %q, want solo — the bad batch must not be used at all", i, name)
+		}
+	}
+	if calls != 4 {
+		t.Errorf("saw %d requests, want 4 (one failed batch, then three singles)", calls)
+	}
+	if stats.subject.requests != 4 || stats.subject.misses != 3 {
+		t.Errorf("stats = %d uncached in %d requests, want 3 in 4", stats.subject.misses, stats.subject.requests)
 	}
 }

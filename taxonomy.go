@@ -9,7 +9,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -53,6 +55,7 @@ func cmdTaxonomy(args []string) error {
 	tailN := fs.Int("tail-n", 1, "the tail metric counts subjects with at most this many videos")
 	center := fs.Bool("center", true, "subtract the mean vector before clustering — spreads out embeddings that crowd into one band")
 	noLLM := fs.Bool("no-llm", false, "name clusters from their strongest member instead of asking the chat model")
+	nameBatch := fs.Int("name-batch", defaultNameBatch, "subjects per naming request; >1 is 2.4x faster cold but changes the names, so raise it only when calibrating thresholds (top levels are always named singly)")
 	probe := fs.Bool("probe", false, "measure server latency (one embedding batch, one chat request) and estimate the run; changes nothing")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
@@ -122,7 +125,7 @@ func cmdTaxonomy(args []string) error {
 		map[bool]string{true: ", mean-centered"}[*center])
 	timer.mark("embed")
 
-	namer, nameStats := newNamer(client, *noLLM, log, p.nameCacheDir())
+	namer, nameStats := newNamer(client, *noLLM, log, p.nameCacheDir(), *nameBatch)
 	opts := taxonomy.RefineOpts{
 		SplitAt:    *fine * 0.7,
 		MaxRadius:  *maxRadius,
@@ -406,14 +409,18 @@ func writeNameCache(dir, model, system, user, reply string) {
 }
 
 // kindStats counts one altitude's ("subject" or "top") naming outcomes over
-// a run: answers the disk cache served, real requests sent to the model
-// (cache misses — successes and failures both, since both pay the network),
-// how many of those requests failed and fell back to the cluster's strongest
-// member, and the wall-clock time spent inside ChatMax for the real ones.
-// Fields are only ever touched through atomic.AddInt64 — see namingStats.
+// a run: answers the disk cache served, clusters it did not cover, how many
+// chat requests those cost (fewer than the clusters, since a request names
+// up to nameBatch of them), how many names fell back to the cluster's
+// strongest member, and the wall-clock time spent inside ChatMax.
+//
+// misses and requests are separate on purpose: misses is the work the cache
+// could not save, requests is what that work cost the server, and the ratio
+// between them is the whole point of batching. Fields are only ever touched
+// through atomic.AddInt64 — see namingStats.
 type kindStats struct {
-	hits, misses, fallbacks int64
-	reqNanos                int64 // sum of time.Since around each ChatMax call counted in misses
+	hits, misses, requests, fallbacks int64
+	reqNanos                          int64 // sum of time.Since around each ChatMax call
 }
 
 // namingStats is the answer to "how many of the 86s run and its 380ms/warm-
@@ -444,8 +451,8 @@ func (s *namingStats) forKind(kind string) *kindStats {
 func (s *namingStats) detail() map[string]any {
 	kindDetail := func(k kindStats) map[string]any {
 		return map[string]any{
-			"cached": k.hits, "requested": k.misses, "fallback": k.fallbacks,
-			"request_ms": time.Duration(k.reqNanos).Milliseconds(),
+			"cached": k.hits, "uncached": k.misses, "requests": k.requests,
+			"fallback": k.fallbacks, "request_ms": time.Duration(k.reqNanos).Milliseconds(),
 		}
 	}
 	return map[string]any{"subject": kindDetail(s.subject), "top": kindDetail(s.top)}
@@ -456,21 +463,149 @@ func (s *namingStats) detail() map[string]any {
 func (s *namingStats) line() string {
 	part := func(kind string, k kindStats) string {
 		avg := time.Duration(0)
-		if k.misses > 0 {
-			avg = time.Duration(k.reqNanos / k.misses)
+		if k.requests > 0 {
+			avg = time.Duration(k.reqNanos / k.requests)
 		}
-		return fmt.Sprintf("%s %d cached %d requested %d fallback (%s, %s/req)",
-			kind, k.hits, k.misses, k.fallbacks,
+		return fmt.Sprintf("%s %d cached %d uncached in %d req %d fallback (%s, %s/req)",
+			kind, k.hits, k.misses, k.requests, k.fallbacks,
 			time.Duration(k.reqNanos).Round(time.Millisecond), avg.Round(time.Millisecond))
 	}
 	return part("subject", s.subject) + " | " + part("top", s.top)
 }
 
-// newNamer returns the cluster-naming function: one chat request per cluster,
-// falling back to the strongest member's sub on any model trouble. kind is
-// "subject" or "top" and only changes the prompt's altitude. The returned
-// namingStats fills in as the closure runs; read it only after the run is
-// done with it.
+// defaultNameBatch is 1 — one cluster per naming request — and that default
+// is a measurement, not caution.
+//
+// Batching works, and it is fast: naming is latency-bound rather than
+// token-bound, so twelve clusters in one prompt turned a cold run's 335
+// requests into 44 and 518.6 s into 216.0 s, 2.4x. What it also did was
+// change the names, and through them the taxonomy: the same corpus that
+// settles at 188 subjects under 9 tops named one at a time came back as 198
+// under 11, and its biggest section — 64 subjects, 12751 views, music
+// included — was called "subject-a". That is precisely the failure
+// taxonomy.GroupPrompt was written to fix. Asking the tops singly did not
+// save it (still "subject-a"), because the damage is upstream: batched
+// subject names differ, MergeSameNames then merges different clusters, and
+// the coarse groups it feeds are no longer the same groups.
+//
+// So the speed is real and the cost is the output. Raise -name-batch when
+// the names do not matter and the run does — calibrating -fine/-coarse,
+// where only the shape of the tree is being read — and leave it at 1 when
+// the taxonomy is meant to be kept. A warm rerun asks nothing either way.
+const defaultNameBatch = 1
+
+// nameAltitude is the one sentence that separates the two naming jobs.
+func nameAltitude(kind string) string {
+	if kind == "top" {
+		return "the broad top-level category the members share, like a site section"
+	}
+	return "the cluster's one shared subject, as specific as the members allow"
+}
+
+// writeClusterBody renders the members and channels a namer reads. prefix is
+// "" for the single-cluster prompt and an indent for the batch, where several
+// clusters sit under numbers.
+//
+// Twelve members at most: a namer reads the strongest ones and the tail only
+// costs tokens.
+func writeClusterBody(b *strings.Builder, c taxonomy.Cluster, prefix string) {
+	fmt.Fprintf(b, "%smembers:\n", prefix)
+	for i, l := range c.Members {
+		if i == 12 {
+			fmt.Fprintf(b, "%s  … and %d more\n", prefix, len(c.Members)-i)
+			break
+		}
+		fmt.Fprintf(b, "%s  %s (%d views)\n", prefix, l.Topic(), l.Views)
+	}
+	if ch := c.TopChannels(5); len(ch) > 0 {
+		fmt.Fprintf(b, "%schannels: %s\n", prefix, strings.Join(ch, ", "))
+	}
+}
+
+// nameSinglePrompt is the one-cluster prompt — and, just as importantly, the
+// CACHE KEY for that cluster's name whether the answer arrived alone or
+// inside a batch. Keying on the single prompt is what lets batching change
+// how names are fetched without invalidating a single cached name: the
+// wording here must not drift, or every existing entry goes cold at once.
+func nameSinglePrompt(c taxonomy.Cluster, kind string) (system, user string) {
+	system = "You name clusters of YouTube watch-history topic labels.\n" +
+		"Reply with EXACTLY one short lowercase slug (a-z, 0-9, dashes; at most three words " +
+		"joined by dashes) naming " + nameAltitude(kind) + ".\n" +
+		"Prefer reusing a member label's name when it already covers the whole cluster. No prose."
+	var u strings.Builder
+	writeClusterBody(&u, c, "")
+	return system, u.String()
+}
+
+// nameBatchPrompt renders one prompt for several clusters. Same shape as
+// classification's batch prompt, and for the same reason: one LINE per
+// cluster keyed by its NUMBER, never by its name. A name is exactly the
+// thing the model is being asked to invent, so it cannot also be the key —
+// and 1..N is copyable, which the high-entropy alternatives are not.
+func nameBatchPrompt(cs []taxonomy.Cluster, kind string) (system, user string) {
+	var b strings.Builder
+	b.WriteString("You name clusters of YouTube watch-history topic labels.\n")
+	fmt.Fprintf(&b, "You get %d numbered clusters. Reply with EXACTLY one line per cluster, in the same order:\n", len(cs))
+	b.WriteString("<n> <slug>\n")
+	fmt.Fprintf(&b, "<slug> is ONE short lowercase slug (a-z, 0-9, dashes; at most three words joined by dashes) naming %s.\n",
+		nameAltitude(kind))
+	b.WriteString("Prefer reusing a member label's name when it already covers the whole cluster.\n")
+	b.WriteString("No prose, no code fences, no JSON, no blank lines.\n")
+	b.WriteString("Example: 2 indie-rock")
+
+	var u strings.Builder
+	for i, c := range cs {
+		fmt.Fprintf(&u, "%d.\n", i+1)
+		writeClusterBody(&u, c, "   ")
+	}
+	return b.String(), u.String()
+}
+
+// nameLineRe matches the reply key "1" / "2." / "3)" plus the slug after it.
+var nameLineRe = regexp.MustCompile(`^(\d+)[.):]?\s+(\S.*)$`)
+
+// parseNameBatch maps a batch reply back onto the clusters that were asked
+// about; the name on line n belongs to cs[n-1]. STRICT, exactly like
+// ParseBatchVerdicts: every number 1..n must appear once with a slug that
+// survives slugging, nothing may name a number outside the range, and any
+// violation is an error the caller answers with single requests. A name that
+// landed on the wrong cluster is invisible afterwards — it just reads as a
+// badly named subject — so the mapping is verified, never guessed.
+func parseNameBatch(reply string, n int) ([]string, error) {
+	out := make([]string, n)
+	for _, line := range strings.Split(reply, "\n") {
+		m := nameLineRe.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil {
+			continue // prose, fences, blank lines — completeness is checked below
+		}
+		idx, err := strconv.Atoi(m[1])
+		if err != nil || idx < 1 || idx > n {
+			return nil, fmt.Errorf("name for line %s of %d", m[1], n)
+		}
+		if out[idx-1] != "" {
+			return nil, fmt.Errorf("duplicate name for line %d", idx)
+		}
+		if rules.SlugifySub(m[2]) == "" {
+			return nil, fmt.Errorf("line %d: %q is not a usable slug", idx, m[2])
+		}
+		// The RAW answer is what comes back, not the slug — the single path
+		// caches the model's words and slugs them afterwards, and a batched
+		// name has to be stored the same way or the two disagree on rerun.
+		out[idx-1] = m[2]
+	}
+	for i, s := range out {
+		if s == "" {
+			return nil, fmt.Errorf("reply misses a name for line %d of %d", i+1, n)
+		}
+	}
+	return out, nil
+}
+
+// newNamer returns the cluster-naming function: it takes the clusters that
+// need a name and returns one name each, in order, falling back to the
+// strongest member's sub on any model trouble. kind is "subject" or "top"
+// and only changes the prompt's altitude. The returned namingStats fills in
+// as the closure runs; read it only after the run is done with it.
 //
 // Replies are cached on disk under the prompt, because the intended way to
 // steer a run is to edit the control file and run the same command again —
@@ -480,17 +615,18 @@ func (s *namingStats) line() string {
 // on its own. To throw the names away deliberately, delete the directory.
 //
 // There is deliberately no worker knob here, the way -llm-workers exists for
-// classification. It was measured against the real server before it was
-// written: eight naming requests took 737 ms each in sequence, and 986 ms
-// each across two workers, 967 ms across four — concurrency made the run
-// 25% SLOWER, because oMLX decodes one chat request at a time and the extra
-// workers only add queueing. The counters this returns are what would tell a
-// future attempt whether anything changed: a cold run asks 388 times (286
-// subjects, 102 top levels), a warm one asks nothing at all. If that cost is
-// ever worth attacking, the lever is fewer requests — one prompt naming
-// several clusters, the way classification batches its verdicts — not more
-// requests at once.
-func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) (func(c taxonomy.Cluster, kind string) string, *namingStats) {
+// classification. It was measured against the real server before anything
+// was written: eight naming requests took 737 ms each in sequence, and
+// 986 ms each across two workers, 967 ms across four — concurrency made the
+// run 25% SLOWER, because oMLX decodes one chat request at a time and the
+// extra workers only add queueing.
+//
+// So the lever is fewer requests, not more at once, and that is what
+// nameBatch is: the clusters a round cannot serve from cache are named a
+// dozen per request. The counters say what it bought — a cold run used to
+// send 388 requests (286 subjects, 102 top levels, one apiece), a warm one
+// still sends none.
+func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nameBatch int) (func(cs []taxonomy.Cluster, kind string) []string, *namingStats) {
 	warned := false
 	stats := &namingStats{}
 	// One mkdir up front: a cache that cannot exist costs speed, not the run.
@@ -500,74 +636,144 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) (fu
 			cacheDir = ""
 		}
 	}
-	namer := func(c taxonomy.Cluster, kind string) string {
-		fallback := taxonomy.FallbackName(c)
+	// slugOr turns a model's raw answer into a name, keeping the cluster's
+	// strongest member as the floor. Slugging stays a code decision that a
+	// later change may revise; the cached reply is the model's words.
+	slugOr := func(reply string, c taxonomy.Cluster) string {
+		if slug := rules.SlugifySub(reply); slug != "" {
+			return slug
+		}
+		return taxonomy.FallbackName(c)
+	}
+
+	// askOne is the single-cluster request: the path for a lone leftover, and
+	// the answer to a batch the model got wrong.
+	askOne := func(c taxonomy.Cluster, kind string, ks *kindStats) string {
+		system, user := nameSinglePrompt(c, kind)
+		t0 := time.Now()
+		reply, err := client.ChatMax(system, user, 24)
+		atomic.AddInt64(&ks.reqNanos, int64(time.Since(t0)))
+		atomic.AddInt64(&ks.requests, 1)
+		if err != nil {
+			atomic.AddInt64(&ks.fallbacks, 1)
+			if !warned {
+				fmt.Fprintf(os.Stderr, "warning: naming via LLM failed (%v) — falling back to member names\n", err)
+				warned = true
+			}
+			log.event("name-fallback", map[string]any{"cluster": taxonomy.FallbackName(c), "error": err.Error()})
+			return taxonomy.FallbackName(c)
+		}
+		writeNameCache(cacheDir, client.Model, system, user, reply)
+		return slugOr(reply, c)
+	}
+
+	namer := func(cs []taxonomy.Cluster, kind string) []string {
+		out := make([]string, len(cs))
 		if noLLM {
 			// -no-llm never asks the model, so it never touches stats: the
 			// naming line simply reads all zeros, which is the true count.
-			return fallback
+			for i, c := range cs {
+				out[i] = taxonomy.FallbackName(c)
+			}
+			return out
 		}
 		ks := stats.forKind(kind)
-		altitude := "the cluster's one shared subject, as specific as the members allow"
-		if kind == "top" {
-			altitude = "the broad top-level category the members share, like a site section"
-		}
-		system := "You name clusters of YouTube watch-history topic labels.\n" +
-			"Reply with EXACTLY one short lowercase slug (a-z, 0-9, dashes; at most three words " +
-			"joined by dashes) naming " + altitude + ".\n" +
-			"Prefer reusing a member label's name when it already covers the whole cluster. No prose."
-		var u strings.Builder
-		u.WriteString("members:\n")
-		for i, l := range c.Members {
-			if i == 12 {
-				fmt.Fprintf(&u, "  … and %d more\n", len(c.Members)-i)
-				break
+
+		// The cache is consulted per cluster, under the single-cluster
+		// prompt, whatever shape the request that filled it had. That is what
+		// makes batching free to adopt: a run after this change still finds
+		// every name an earlier run paid for.
+		var miss []int
+		for i, c := range cs {
+			system, user := nameSinglePrompt(c, kind)
+			reply, cached := readNameCache(cacheDir, client.Model, system, user)
+			if !cached {
+				miss = append(miss, i)
+				continue
 			}
-			fmt.Fprintf(&u, "  %s (%d views)\n", l.Topic(), l.Views)
-		}
-		if ch := c.TopChannels(5); len(ch) > 0 {
-			u.WriteString("channels: " + strings.Join(ch, ", ") + "\n")
-		}
-		user := u.String()
-		// The raw reply is what gets cached, not the slug: slugging stays a
-		// code decision that a later change may revise, the reply is the
-		// model's answer and does not move.
-		reply, cached := readNameCache(cacheDir, client.Model, system, user)
-		if cached {
 			atomic.AddInt64(&ks.hits, 1)
-		} else {
-			t0 := time.Now()
-			var err error
-			reply, err = client.ChatMax(system, user, 24)
-			atomic.AddInt64(&ks.reqNanos, int64(time.Since(t0)))
-			atomic.AddInt64(&ks.misses, 1)
-			if err != nil {
-				atomic.AddInt64(&ks.fallbacks, 1)
-				if !warned {
-					fmt.Fprintf(os.Stderr, "warning: naming via LLM failed (%v) — falling back to member names\n", err)
-					warned = true
-				}
-				log.event("name-fallback", map[string]any{"cluster": fallback, "error": err.Error()})
-				return fallback
+			out[i] = slugOr(reply, c)
+		}
+		atomic.AddInt64(&ks.misses, int64(len(miss)))
+
+		// Top levels are always asked one at a time, whatever -name-batch
+		// says. There are only ever a handful of them — five of a cold run's
+		// 44 requests — so batching them buys almost nothing, and a batched
+		// run named the 12751-view section "section-a" over 64 subjects
+		// including music. A section name is the most visible name the run
+		// produces; it gets the prompt's whole attention.
+		batchSize := 1
+		if kind != "top" {
+			batchSize = max(nameBatch, 1)
+		}
+		for off := 0; off < len(miss); off += batchSize {
+			chunk := miss[off:min(off+batchSize, len(miss))]
+			if len(chunk) == 1 {
+				// A batch prompt for one cluster is the single prompt with
+				// extra ceremony, and its reply is not cache-compatible.
+				out[chunk[0]] = askOne(cs[chunk[0]], kind, ks)
+				continue
 			}
-			writeNameCache(cacheDir, client.Model, system, user, reply)
+			batch := make([]taxonomy.Cluster, len(chunk))
+			for n, i := range chunk {
+				batch[n] = cs[i]
+			}
+			system, user := nameBatchPrompt(batch, kind)
+			t0 := time.Now()
+			// max_tokens scales with the batch: a reply cut off mid-list
+			// loses the clusters at its end, and those are real names.
+			reply, err := client.ChatMax(system, user, 24*len(chunk))
+			atomic.AddInt64(&ks.reqNanos, int64(time.Since(t0)))
+			atomic.AddInt64(&ks.requests, 1)
+			var names []string
+			if err == nil {
+				names, err = parseNameBatch(reply, len(chunk))
+			}
+			if err != nil {
+				// One unusable batch costs len(chunk) requests, never a name
+				// on the wrong cluster — a misplaced name is invisible later.
+				log.event("name-batch-retry", map[string]any{
+					"kind": kind, "clusters": len(chunk), "error": err.Error(),
+				})
+				for _, i := range chunk {
+					out[i] = askOne(cs[i], kind, ks)
+				}
+				continue
+			}
+			for n, i := range chunk {
+				out[i] = slugOr(names[n], cs[i])
+				// Stored under the SINGLE prompt, so the next run finds it
+				// however this one happened to ask.
+				s, u := nameSinglePrompt(cs[i], kind)
+				writeNameCache(cacheDir, client.Model, s, u, names[n])
+			}
 		}
-		slug := rules.SlugifySub(reply)
-		if slug == "" {
-			return fallback
-		}
-		return slug
+		return out
 	}
 	return namer, stats
 }
 
 // nameSubjects names clusters: all of them on the first pass, only unnamed
-// pieces (fresh splits) afterwards — merges keep their names.
-func nameSubjects(cs []taxonomy.Cluster, namer func(taxonomy.Cluster, string) string, all bool) {
+// pieces (fresh splits) afterwards — merges keep their names. The ones that
+// need a name go to the namer together, so a round of fresh splits costs a
+// handful of requests instead of one per piece.
+func nameSubjects(cs []taxonomy.Cluster, namer func([]taxonomy.Cluster, string) []string, all bool) {
+	var idx []int
 	for i := range cs {
 		if all || cs[i].Name == "" {
-			cs[i].Name = namer(cs[i], "subject")
+			idx = append(idx, i)
 		}
+	}
+	if len(idx) == 0 {
+		return
+	}
+	batch := make([]taxonomy.Cluster, len(idx))
+	for n, i := range idx {
+		batch[n] = cs[i]
+	}
+	names := namer(batch, "subject")
+	for n, i := range idx {
+		cs[i].Name = names[n]
 	}
 }
 
@@ -575,20 +781,33 @@ func nameSubjects(cs []taxonomy.Cluster, namer func(taxonomy.Cluster, string) st
 // groups landing on the same name simply ARE one top level — nothing to
 // dedupe. Groups under the minTopVideos bar are folded into their nearest
 // neighbour first, so a far-out subject does not become a section of one.
-func assignParents(cs []taxonomy.Cluster, coarse float64, minTopVideos int, keep map[string]bool, namer func(taxonomy.Cluster, string) string) {
+func assignParents(cs []taxonomy.Cluster, coarse float64, minTopVideos int, keep map[string]bool, namer func([]taxonomy.Cluster, string) []string) {
 	groups := taxonomy.FoldSmallGroups(cs, taxonomy.Coarse(cs, coarse), minTopVideos, keep)
+	// The WHOLE group carries the naming prompt, one label per subject:
+	// naming it after its strongest subject alone called a top level of
+	// 31 music subjects "subject-a" and one of 29 sport subjects
+	// "cycling". TopChannels then sums across the group too.
+	//
+	// All groups go in one call: a corpus has around ten top levels, which
+	// is under nameBatch, so a round that used to cost ten requests now
+	// costs one.
+	var prompts []taxonomy.Cluster
+	var named [][]int
 	for _, group := range groups {
-		// The WHOLE group carries the naming prompt, one label per subject:
-		// naming it after its strongest subject alone called a top level of
-		// 31 music subjects "subject-a" and one of 29 sport subjects
-		// "cycling". TopChannels then sums across the group too.
 		prompt := taxonomy.GroupPrompt(cs, group)
 		if len(prompt.Members) == 0 {
 			continue
 		}
-		top := namer(prompt, "top")
+		prompts = append(prompts, prompt)
+		named = append(named, group)
+	}
+	if len(prompts) == 0 {
+		return
+	}
+	tops := namer(prompts, "top")
+	for n, group := range named {
 		for _, i := range group {
-			cs[i].Parent = top
+			cs[i].Parent = tops[n]
 		}
 	}
 }

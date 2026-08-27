@@ -61,6 +61,10 @@ Usage:
                                   data/out/taxonomy-run.jsonl. Flags: -embed-model
                                   bge-m3-mlx-fp16, -fine 0.70, -coarse 0.85, -min-videos 3,
                                   -rounds 10, -center=false (skip mean-centering), -no-llm,
+                                  -name-batch 1 (raise to name several subjects per
+                                  request: 2.4x faster on a cold run, but it changes
+                                  the names — for threshold calibration, not for a
+                                  taxonomy you mean to keep),
                                   -probe (measure server latency, change nothing)
   youtubehistii report            render data/out/report.csv + terminal summary; the same
                                   numbers are a view of the watchpath page, at #/report
