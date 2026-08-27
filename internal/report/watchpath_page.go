@@ -258,6 +258,7 @@ const RH = {{.RowHeight}};
 const viewEl = document.getElementById("view");
 const crumbsEl = document.getElementById("crumbs");
 const tipEl = document.getElementById("tip");
+const pathNoteEl = document.querySelector("details.note");
 
 // ---- element helpers -------------------------------------------------
 
@@ -583,6 +584,13 @@ function route() {
   viewEl.textContent = "";
   const h = (location.hash || "").replace(/^#/, "") || "/";
   const parts = h.split("/").filter(s => s.length > 0);
+
+  // The note above describes how a timeline is read: sittings, gaps, the
+  // overlap legend. The report does none of that reading — it sums — and it
+  // carries its own caveat about the hours being an upper bound. Two notes
+  // opening with "Takeout logs when a video was STARTED" on one screen say it
+  // once too often, so the timeline note stands down there.
+  pathNoteEl.hidden = parts[0] === "report";
 
   if (parts[0] === "topics") {
     // The focus travels as names, not indices: an index would move whenever
