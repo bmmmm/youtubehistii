@@ -77,6 +77,29 @@ func TestAggregate(t *testing.T) {
 	}
 }
 
+// A view watched just before midnight UTC belongs to the month the viewer
+// was actually in — the same wall-clock basis BuildPath uses for its days.
+// Two views of one page may not run on two time bases.
+func TestMonthsFollowWallClock(t *testing.T) {
+	local := time.Local
+	time.Local = time.FixedZone("TEST+2", 2*3600)
+	t.Cleanup(func() { time.Local = local })
+
+	rows := []classify.Verdict{
+		{VideoID: "a", Title: "late", Channel: "C", ChannelID: "UCc",
+			WatchedAt: time.Date(2026, 7, 31, 23, 30, 0, 0, time.UTC),
+			Topic:     "gaming/rust", Mode: "consume", Source: "rule:x", DurationS: 60},
+	}
+	st := Aggregate(rows, nil)
+
+	if len(st.Months) != 1 || st.Months[0].Month != "2026-08" {
+		t.Errorf("months = %+v, want one bucket 2026-08", st.Months)
+	}
+	if got := st.From.Format("2006-01-02 15:04"); got != "2026-08-01 01:30" {
+		t.Errorf("from = %s, want 2026-08-01 01:30", got)
+	}
+}
+
 func TestRenderHTML(t *testing.T) {
 	rows, subs := sampleData()
 	st := Aggregate(rows, subs)

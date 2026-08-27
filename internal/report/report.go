@@ -143,11 +143,15 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 			st.Sources["unclassified"]++
 		}
 		if !r.WatchedAt.IsZero() {
+			// Takeout serialises every timestamp as UTC, but a report is
+			// read in wall-clock time — the same basis BuildPath uses for
+			// its days. Comparing instants is timezone-blind; only the
+			// rendering below cares, so the conversion happens here.
 			if st.From.IsZero() || r.WatchedAt.Before(st.From) {
-				st.From = r.WatchedAt
+				st.From = r.WatchedAt.Local()
 			}
 			if r.WatchedAt.After(st.To) {
-				st.To = r.WatchedAt
+				st.To = r.WatchedAt.Local()
 			}
 		}
 
@@ -165,7 +169,7 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 		}
 
 		if !r.WatchedAt.IsZero() {
-			mk := r.WatchedAt.Format("2006-01")
+			mk := r.WatchedAt.Local().Format("2006-01")
 			m := months[mk]
 			if m == nil {
 				m = &MonthAgg{Month: mk, ModeViews: map[string]int{}, ModeHours: map[string]float64{}}
