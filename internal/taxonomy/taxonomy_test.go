@@ -6,6 +6,7 @@ import (
 	"math"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -138,6 +139,46 @@ func TestClusteringIsDeterministic(t *testing.T) {
 }
 
 func slug(i int) string { return string(rune('a'+i%26)) + string(rune('a'+(i/26)%26)) }
+
+// TestAgglomerateIsIndependentOfCoreCount pins the promise the parallel
+// distance loops make: the grouping is decided by the input alone, never by
+// how many workers happened to run it. TestClusteringIsDeterministic covers
+// repeatability at 40 labels, which is below parMinRows and therefore never
+// leaves the serial path — this one deliberately sits above it and compares
+// one core against many.
+func TestAgglomerateIsIndependentOfCoreCount(t *testing.T) {
+	// Above parMinRows, or both runs take the serial path and the test proves
+	// nothing about the change it is here to guard.
+	const n = parMinRows + 64
+	vecs := make([][]float32, n)
+	weights := make([]int, n)
+	for i := range vecs {
+		// Sixteen loose groups on a ring, every point nudged off its centre:
+		// the fixture has to actually merge, because the row update is the
+		// second parallel loop and an all-singleton run would never reach it.
+		angle := float64(i%16)*(2*math.Pi/16) + float64(i/16)*0.004
+		v := make([]float32, 64)
+		v[0] = float32(math.Cos(angle))
+		v[1] = float32(math.Sin(angle))
+		v[2+i%62] = float32(0.01 * float64(i%7))
+		vecs[i] = v
+		weights[i] = 1 + i%5
+	}
+
+	prev := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(prev)
+	serial := agglomerate(vecs, weights, 0.15)
+	runtime.GOMAXPROCS(8)
+	parallel := agglomerate(vecs, weights, 0.15)
+
+	if len(serial) == n {
+		t.Fatal("fixture produced no merges — the parallel row update never ran, so this test guards nothing")
+	}
+	if !reflect.DeepEqual(serial, parallel) {
+		t.Errorf("grouping depends on core count: %d groups on one core, %d on eight",
+			len(serial), len(parallel))
+	}
+}
 
 func TestFoldSmallFoldsIntoNearest(t *testing.T) {
 	labels := []Label{lab("a", "big-x", 50), lab("a", "big-y", 50), lab("a", "tiny", 1)}

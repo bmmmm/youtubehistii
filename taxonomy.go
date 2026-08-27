@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
@@ -121,7 +122,7 @@ func cmdTaxonomy(args []string) error {
 		map[bool]string{true: ", mean-centered"}[*center])
 	timer.mark("embed")
 
-	namer := newNamer(client, *noLLM, log, p.nameCacheDir())
+	namer, nameStats := newNamer(client, *noLLM, log, p.nameCacheDir())
 	opts := taxonomy.RefineOpts{
 		SplitAt:    *fine * 0.7,
 		MaxRadius:  *maxRadius,
@@ -202,8 +203,10 @@ func cmdTaxonomy(args []string) error {
 	}
 	timer.mark("write")
 	log.event("write", map[string]any{"path": taxonomyPath, "subjects": len(subjects), "tops": last.Tops})
+	log.event("naming", nameStats.detail())
 	log.event("timing", timer.spans)
 	fmt.Printf("wrote %s (%d subjects under %d top levels)\n", taxonomyPath, len(subjects), last.Tops)
+	fmt.Printf("naming     %s\n", nameStats.line())
 	fmt.Printf("timing     %s\n", timer.line())
 	fmt.Println("compare with: youtubehistii report -taxonomy / watchpath -taxonomy")
 	return nil
@@ -402,9 +405,72 @@ func writeNameCache(dir, model, system, user, reply string) {
 	os.WriteFile(nameCachePath(dir, model, system, user), b, 0o644)
 }
 
+// kindStats counts one altitude's ("subject" or "top") naming outcomes over
+// a run: answers the disk cache served, real requests sent to the model
+// (cache misses — successes and failures both, since both pay the network),
+// how many of those requests failed and fell back to the cluster's strongest
+// member, and the wall-clock time spent inside ChatMax for the real ones.
+// Fields are only ever touched through atomic.AddInt64 — see namingStats.
+type kindStats struct {
+	hits, misses, fallbacks int64
+	reqNanos                int64 // sum of time.Since around each ChatMax call counted in misses
+}
+
+// namingStats is the answer to "how many of the 86s run and its 380ms/warm-
+// request estimate are real requests, and how many the cache already
+// covers" — a question nobody could answer before this existed. One
+// kindStats per altitude, because "subject" and "top" go through the same
+// closure but at very different counts (a real corpus names ~770 subjects
+// and a couple dozen tops).
+//
+// Atomic counters rather than a mutex: newNamer's closure is called
+// serially today, once per cluster, but making it concurrent is the next
+// planned change to this run — and atomics cost nothing extra to have
+// right, whereas a mutex added after the fact is easy to forget on one of
+// the four fields.
+type namingStats struct {
+	subject, top kindStats
+}
+
+func (s *namingStats) forKind(kind string) *kindStats {
+	if kind == "top" {
+		return &s.top
+	}
+	return &s.subject
+}
+
+// detail is what log.event("naming", ...) writes: one nested object per
+// altitude, in the same plain-map style as the "embed" and "write" events.
+func (s *namingStats) detail() map[string]any {
+	kindDetail := func(k kindStats) map[string]any {
+		return map[string]any{
+			"cached": k.hits, "requested": k.misses, "fallback": k.fallbacks,
+			"request_ms": time.Duration(k.reqNanos).Milliseconds(),
+		}
+	}
+	return map[string]any{"subject": kindDetail(s.subject), "top": kindDetail(s.top)}
+}
+
+// line renders the same counts for the terminal, in metricsLine's
+// pipe-separated style.
+func (s *namingStats) line() string {
+	part := func(kind string, k kindStats) string {
+		avg := time.Duration(0)
+		if k.misses > 0 {
+			avg = time.Duration(k.reqNanos / k.misses)
+		}
+		return fmt.Sprintf("%s %d cached %d requested %d fallback (%s, %s/req)",
+			kind, k.hits, k.misses, k.fallbacks,
+			time.Duration(k.reqNanos).Round(time.Millisecond), avg.Round(time.Millisecond))
+	}
+	return part("subject", s.subject) + " | " + part("top", s.top)
+}
+
 // newNamer returns the cluster-naming function: one chat request per cluster,
 // falling back to the strongest member's sub on any model trouble. kind is
-// "subject" or "top" and only changes the prompt's altitude.
+// "subject" or "top" and only changes the prompt's altitude. The returned
+// namingStats fills in as the closure runs; read it only after the run is
+// done with it.
 //
 // Replies are cached on disk under the prompt, because the intended way to
 // steer a run is to edit the control file and run the same command again —
@@ -412,8 +478,21 @@ func writeNameCache(dir, model, system, user, reply string) {
 // subjects, one request each. The cache key carries the chat model, so
 // swapping the model in rules.yaml (the answer to unusable names) bypasses it
 // on its own. To throw the names away deliberately, delete the directory.
-func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) func(c taxonomy.Cluster, kind string) string {
+//
+// There is deliberately no worker knob here, the way -llm-workers exists for
+// classification. It was measured against the real server before it was
+// written: eight naming requests took 737 ms each in sequence, and 986 ms
+// each across two workers, 967 ms across four — concurrency made the run
+// 25% SLOWER, because oMLX decodes one chat request at a time and the extra
+// workers only add queueing. The counters this returns are what would tell a
+// future attempt whether anything changed: a cold run asks 388 times (286
+// subjects, 102 top levels), a warm one asks nothing at all. If that cost is
+// ever worth attacking, the lever is fewer requests — one prompt naming
+// several clusters, the way classification batches its verdicts — not more
+// requests at once.
+func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) (func(c taxonomy.Cluster, kind string) string, *namingStats) {
 	warned := false
+	stats := &namingStats{}
 	// One mkdir up front: a cache that cannot exist costs speed, not the run.
 	if !noLLM {
 		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -421,11 +500,14 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) fun
 			cacheDir = ""
 		}
 	}
-	return func(c taxonomy.Cluster, kind string) string {
+	namer := func(c taxonomy.Cluster, kind string) string {
 		fallback := taxonomy.FallbackName(c)
 		if noLLM {
+			// -no-llm never asks the model, so it never touches stats: the
+			// naming line simply reads all zeros, which is the true count.
 			return fallback
 		}
+		ks := stats.forKind(kind)
 		altitude := "the cluster's one shared subject, as specific as the members allow"
 		if kind == "top" {
 			altitude = "the broad top-level category the members share, like a site section"
@@ -451,9 +533,16 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) fun
 		// code decision that a later change may revise, the reply is the
 		// model's answer and does not move.
 		reply, cached := readNameCache(cacheDir, client.Model, system, user)
-		if !cached {
+		if cached {
+			atomic.AddInt64(&ks.hits, 1)
+		} else {
+			t0 := time.Now()
 			var err error
-			if reply, err = client.ChatMax(system, user, 24); err != nil {
+			reply, err = client.ChatMax(system, user, 24)
+			atomic.AddInt64(&ks.reqNanos, int64(time.Since(t0)))
+			atomic.AddInt64(&ks.misses, 1)
+			if err != nil {
+				atomic.AddInt64(&ks.fallbacks, 1)
 				if !warned {
 					fmt.Fprintf(os.Stderr, "warning: naming via LLM failed (%v) — falling back to member names\n", err)
 					warned = true
@@ -469,6 +558,7 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string) fun
 		}
 		return slug
 	}
+	return namer, stats
 }
 
 // nameSubjects names clusters: all of them on the first pass, only unnamed

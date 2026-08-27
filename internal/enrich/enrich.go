@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
+	"sync"
 )
 
 // Meta is the pruned per-video metadata we keep — not the full yt-dlp dump.
@@ -140,28 +142,100 @@ func (c Cache) IDs() (map[string]bool, error) {
 }
 
 // ReadAll loads the whole cache into memory (a few KB per video).
+//
+// Measured on the real corpus (29,972 cache files): `classify -no-llm` took
+// 7.28s wall clock but only 1.00s user + 2.44s system CPU time -- 47% of one
+// core, on a serial os.ReadFile + json.Unmarshal loop. The process spends
+// more than half that wall clock simply blocked on disk I/O, one file at a
+// time, while every other core sits idle. A worker pool over the directory
+// listing lets those blocked reads overlap instead of queueing behind each
+// other.
+//
+// The result must not depend on worker count or scheduling order:
+//   - out is built by a single goroutine draining a results channel, so the
+//     map itself never needs a lock.
+//   - on error, the old code stopped at the first bad file it reached in
+//     ReadDir order and returned exactly that error. With workers racing,
+//     several bad files can fail "at once", so the same corrupt cache must
+//     still always report the same error. We resolve that by tagging each
+//     job with its position in the (already sorted, by os.ReadDir) file
+//     list and keeping the error with the lowest index among all that
+//     occurred -- not the one that happened to finish first.
 func (c Cache) ReadAll() (map[string]Meta, error) {
-	out := map[string]Meta{}
 	entries, err := os.ReadDir(c.Dir)
 	if os.IsNotExist(err) {
-		return out, nil
+		return map[string]Meta{}, nil
 	}
 	if err != nil {
 		return nil, err
 	}
+
+	var names []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
-		b, err := os.ReadFile(filepath.Join(c.Dir, e.Name()))
-		if err != nil {
-			return nil, err
+		names = append(names, e.Name())
+	}
+	if len(names) == 0 {
+		return map[string]Meta{}, nil
+	}
+
+	type outcome struct {
+		idx int
+		m   Meta
+		err error
+	}
+	results := make(chan outcome, len(names))
+	jobs := make(chan int)
+
+	workers := min(runtime.GOMAXPROCS(0), len(names))
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for range workers {
+		go func() {
+			defer wg.Done()
+			for idx := range jobs {
+				name := names[idx]
+				b, err := os.ReadFile(filepath.Join(c.Dir, name))
+				if err != nil {
+					results <- outcome{idx: idx, err: err}
+					continue
+				}
+				var m Meta
+				if err := json.Unmarshal(b, &m); err != nil {
+					results <- outcome{idx: idx, err: fmt.Errorf("%s: %w", name, err)}
+					continue
+				}
+				results <- outcome{idx: idx, m: m}
+			}
+		}()
+	}
+	go func() {
+		for idx := range names {
+			jobs <- idx
 		}
-		var m Meta
-		if err := json.Unmarshal(b, &m); err != nil {
-			return nil, fmt.Errorf("%s: %w", e.Name(), err)
+		close(jobs)
+	}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	out := map[string]Meta{}
+	var firstErr error
+	firstErrIdx := -1
+	for r := range results {
+		if r.err != nil {
+			if firstErrIdx == -1 || r.idx < firstErrIdx {
+				firstErr, firstErrIdx = r.err, r.idx
+			}
+			continue
 		}
-		out[m.ID] = m
+		out[r.m.ID] = r.m
+	}
+	if firstErr != nil {
+		return nil, firstErr
 	}
 	return out, nil
 }

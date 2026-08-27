@@ -3,6 +3,7 @@
 package enrich
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -324,5 +325,117 @@ func TestCacheRejectsPathTraversal(t *testing.T) {
 	}
 	if c.Has("../evil") {
 		t.Fatal("Has accepted traversal id")
+	}
+}
+
+// TestCacheReadAllConcurrentIdentity guards the one property that makes the
+// worker pool in ReadAll safe: however many goroutines race to fill it, the
+// resulting map must be byte-for-byte what the old serial loop produced.
+func TestCacheReadAllConcurrentIdentity(t *testing.T) {
+	c := Cache{Dir: t.TempDir()}
+	want := map[string]Meta{}
+	for i := range 50 {
+		id := fmt.Sprintf("vid%08d", i)
+		m := Meta{ID: id, Title: fmt.Sprintf("Title %d", i), Duration: i, Tags: []string{"a", "b"}}
+		if err := c.Write(m); err != nil {
+			t.Fatal(err)
+		}
+		want[id] = m
+	}
+	got, err := c.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ReadAll returned %d entries, want %d", len(got), len(want))
+	}
+	for id, wm := range want {
+		gm, ok := got[id]
+		if !ok {
+			t.Fatalf("missing entry %s", id)
+		}
+		if gm.Title != wm.Title || gm.Duration != wm.Duration || strings.Join(gm.Tags, ",") != strings.Join(wm.Tags, ",") {
+			t.Errorf("%s: got %+v, want %+v", id, gm, wm)
+		}
+	}
+}
+
+// TestCacheReadAllErrorNamesFile: a single corrupt JSON file among good ones
+// must still surface as an error naming that file, exactly as the serial
+// loop did before the worker pool.
+func TestCacheReadAllErrorNamesFile(t *testing.T) {
+	c := Cache{Dir: t.TempDir()}
+	for _, id := range []string{"aaa1111111", "ccc3333333"} {
+		if err := c.Write(Meta{ID: id}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	broken := filepath.Join(c.Dir, "bbb2222222.json")
+	if err := os.WriteFile(broken, []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.ReadAll()
+	if err == nil {
+		t.Fatal("want an error for the corrupt entry")
+	}
+	if !strings.Contains(err.Error(), "bbb2222222.json") {
+		t.Errorf("error %q does not name the broken file", err)
+	}
+}
+
+// TestCacheReadAllErrorIsDeterministic: with several bad files, workers can
+// hit them "at the same time" -- ReadAll must still always resolve to the
+// SAME error (the one whose file sorts first in os.ReadDir order), run after
+// run, or the same broken cache would report a different failure depending
+// on scheduling luck.
+func TestCacheReadAllErrorIsDeterministic(t *testing.T) {
+	dir := t.TempDir()
+	c := Cache{Dir: dir}
+	if err := c.Write(Meta{ID: "aaa1111111"}); err != nil {
+		t.Fatal(err)
+	}
+	// "bbb..." sorts before "ccc..." in the directory listing ReadAll uses,
+	// so bbb's parse error is the one that must always win.
+	if err := os.WriteFile(filepath.Join(dir, "bbb2222222.json"), []byte("not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "ccc3333333.json"), []byte("also not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 20; i++ {
+		_, err := c.ReadAll()
+		if err == nil {
+			t.Fatal("want an error")
+		}
+		if !strings.Contains(err.Error(), "bbb2222222.json") {
+			t.Errorf("run %d: error %q, want it to always name bbb2222222.json", i, err)
+		}
+	}
+}
+
+// TestCacheReadAllEmptyDir and TestCacheReadAllMissingDir: ReadAll's behavior
+// on no data must be untouched by the switch to a worker pool -- an empty
+// map, no error, whether the directory exists and is empty or doesn't exist
+// at all.
+func TestCacheReadAllEmptyDir(t *testing.T) {
+	c := Cache{Dir: t.TempDir()}
+	got, err := c.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ReadAll = %v, want empty map", got)
+	}
+}
+
+func TestCacheReadAllMissingDir(t *testing.T) {
+	c := Cache{Dir: filepath.Join(t.TempDir(), "does-not-exist")}
+	got, err := c.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ReadAll = %v, want empty map", got)
 	}
 }

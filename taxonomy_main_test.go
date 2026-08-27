@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/omlx"
 	"github.com/bmmmm/youtubehistii/internal/taxonomy"
 )
 
@@ -90,6 +91,126 @@ func fakeOMLX(t *testing.T, chatCalls *int) *httptest.Server {
 		fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, name)
 	})
 	return httptest.NewServer(mux)
+}
+
+// fakeChatTransport answers every chat/completions request with one fixed
+// reply, entirely in-process: http.Client hands the request straight to
+// RoundTrip and never opens a socket, so this works even though this
+// sandbox denies httptest.NewServer's bind ("bind: operation not
+// permitted") — the same reason TestCmdTaxonomyEndToEnd (which does use
+// httptest, via fakeOMLX) cannot run here.
+type fakeChatTransport struct {
+	calls *int
+	reply string
+}
+
+func (f fakeChatTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	*f.calls++
+	body := fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, f.reply)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+// TestNamerCountsCacheHitsAndRequests nails down the counting newNamer now
+// does: the same cluster named twice must cost exactly one real request —
+// the first call is a cache miss that pays the (fake) model and writes the
+// cache, the second reads it back — and the counters must land on the
+// altitude ("subject") actually asked for, not the other one.
+func TestNamerCountsCacheHitsAndRequests(t *testing.T) {
+	var calls int
+	client := &omlx.Client{
+		BaseURL: "http://fake.invalid/v1",
+		Model:   "test-chat",
+		HTTP:    &http.Client{Transport: fakeChatTransport{calls: &calls, reply: "jazz"}},
+	}
+	log, err := newRunLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.close()
+
+	namer, stats := newNamer(client, false, log, t.TempDir())
+	cluster := taxonomy.Cluster{
+		Members: []taxonomy.Label{{Area: "music", Sub: "jazz", Views: 3, Videos: 2}},
+		Views:   3,
+	}
+
+	if got := namer(cluster, "subject"); got != "jazz" {
+		t.Fatalf("first call = %q, want jazz", got)
+	}
+	if got := namer(cluster, "subject"); got != "jazz" {
+		t.Fatalf("second call = %q, want jazz", got)
+	}
+
+	if calls != 1 {
+		t.Errorf("transport saw %d requests, want 1 — the second call should have been a cache hit", calls)
+	}
+	if stats.subject.hits != 1 {
+		t.Errorf("subject hits = %d, want 1", stats.subject.hits)
+	}
+	if stats.subject.misses != 1 {
+		t.Errorf("subject requested = %d, want 1", stats.subject.misses)
+	}
+	if stats.subject.fallbacks != 0 {
+		t.Errorf("subject fallbacks = %d, want 0", stats.subject.fallbacks)
+	}
+	if stats.subject.reqNanos <= 0 {
+		t.Error("the one real request recorded no time")
+	}
+	if stats.top.hits != 0 || stats.top.misses != 0 || stats.top.fallbacks != 0 {
+		t.Error("a subject-kind call must not touch the top counters")
+	}
+
+	// A failing request must count as a request AND a fallback, not a hit —
+	// and must not poison the cache, so it costs a request every time it is
+	// asked again.
+	failing := &omlx.Client{
+		BaseURL: "http://fake.invalid/v1",
+		Model:   "test-chat",
+		HTTP: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("connection refused")
+		})},
+	}
+	failNamer, failStats := newNamer(failing, false, log, t.TempDir())
+	other := taxonomy.Cluster{Members: []taxonomy.Label{{Area: "sports", Sub: "chess", Views: 1, Videos: 1}}}
+	if got, want := failNamer(other, "top"), "chess"; got != want {
+		t.Fatalf("fallback = %q, want %q (the failing request's fallback name)", got, want)
+	}
+	if failStats.top.misses != 1 || failStats.top.fallbacks != 1 || failStats.top.hits != 0 {
+		t.Errorf("top stats after a failed request = %+v, want 1 miss, 1 fallback, 0 hits", failStats.top)
+	}
+}
+
+// roundTripFunc adapts a plain function to http.RoundTripper, the same
+// pattern net/http/httptest itself documents for a mock transport.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+// TestNamerNoLLMSkipsStats locks in the -no-llm contract: the namer must
+// still return a usable name, and it must do so without touching the
+// counters at all — the naming line then reads all zeros, which is the
+// true count of a run that never asks the model anything.
+func TestNamerNoLLMSkipsStats(t *testing.T) {
+	log, err := newRunLog(filepath.Join(t.TempDir(), "log.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer log.close()
+
+	// cacheDir does not even need to exist: -no-llm never touches it.
+	namer, stats := newNamer(nil, true, log, filepath.Join(t.TempDir(), "does-not-exist"))
+	cluster := taxonomy.Cluster{Members: []taxonomy.Label{{Area: "music", Sub: "jazz", Views: 1, Videos: 1}}}
+
+	if got := namer(cluster, "subject"); got != "jazz" {
+		t.Fatalf("got %q, want the fallback name jazz", got)
+	}
+	if *stats != (namingStats{}) {
+		t.Errorf("stats = %+v, want all zero — -no-llm must never touch the counters", *stats)
+	}
 }
 
 // captureStdout runs fn with os.Stdout on a pipe and returns what it
