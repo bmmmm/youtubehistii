@@ -17,10 +17,14 @@ server on `127.0.0.1`) as fallback. Every verdict records *why* it was made.
 youtubehistii import   data/watch-history.json    → data/history.jsonl
 youtubehistii enrich                              → data/cache/meta/<videoID>.json
 youtubehistii classify                            → data/classified.jsonl
+youtubehistii taxonomy                            → config/taxonomy.yaml (optional)
 youtubehistii report                              → data/out/report.csv + terminal summary
 youtubehistii watchpath                           → data/out/watchpath.html (incl. #/report)
 
 youtubehistii run      all of enrich + classify + report in one go, overlapped
+youtubehistii inspect  what the metadata cache holds — category distribution and
+                       creator tags, to decide the taxonomy from the data
+                       (read-only, never asks a model)
 ```
 
 Each stage writes plain, inspectable files and can be re-run independently.
@@ -96,7 +100,10 @@ shown. Top-channel tables mark subscribed channels.
 
 - Go ≥ 1.26 (build), `yt-dlp` (enrich stage)
 - an oMLX server for LLM classification (optional — without it, `classify`
-  runs rules-only and says so)
+  runs rules-only and says so). `taxonomy` additionally wants an *embedding*
+  model on the same server (`bge-m3-mlx-fp16` by default, multilingual so
+  that `chess` and `schach` meet); `taxonomy -probe` says whether both models
+  are there and what they cost, without changing anything.
 
 ## Configuration
 
@@ -149,6 +156,56 @@ want to pay for a full re-ask. Enriched metadata is never affected.
 
 If the model spells one subject two ways, fold them with `sub_aliases:` — those
 are applied when verdicts are read back, so folding costs no re-classification.
+
+## A taxonomy derived from the corpus
+
+`sub_aliases:` fixes spellings one pair at a time. `taxonomy` does the same
+job at the scale the free sub level actually produces: it reads the classified
+corpus and derives a two-level tree from it, instead of asking anyone to write
+one.
+
+Every observed `area/sub` label is embedded together with its context — the
+channels it came from, its tags, its titles — and the labels are clustered
+twice over cosine distance: once tightly into **subjects**, once loosely into
+the **top levels** that hold them. A local chat model names each cluster, and
+refinement rounds then split subjects that are too wide to be one thing, merge
+pairs that sit closer than the threshold, and fold the small tail into its
+nearest neighbour. The run stops when a round changes none of its metrics.
+
+```
+youtubehistii taxonomy            → config/taxonomy.yaml
+youtubehistii report -taxonomy    apply it
+youtubehistii watchpath -taxonomy apply it
+```
+
+**The output is a read-side projection, nothing more.** `config/taxonomy.yaml`
+maps `old-area/old-sub → top/subject`; the verdicts in `data/classified.jsonl`
+are never touched, and neither is the classify fingerprint. So a taxonomy you
+dislike costs a rerun, never a re-classification, and hand edits survive until
+the next run.
+
+Steering happens through `config/taxonomy-control.yaml`, which is re-read
+between rounds — `pin` moves one label, `merge` joins subjects, `split` forces
+one apart, `keep` protects a name from the small-tail fold, `stop` ends the
+loop early. What the run did lands in `data/out/taxonomy-run.jsonl`, one JSON
+line per event, for `tail -f`.
+
+Embeddings and names are both cached per label under `data/cache/`, so the
+intended way to steer is to edit the control file and run the same command
+again: a rerun that changes nothing asks the model nothing. `-probe` measures
+what the server costs before a first run commits to it.
+
+Two knobs are worth knowing. `-min-videos` and `-min-top-videos` are size bars
+— without one, a subject whose centroid sits far from everything else becomes
+a section of its own no matter how few videos it holds. And `-name-batch`
+trades naming quality for speed: raising it names several subjects per
+request, which is markedly faster on a cold run and *changes the names*, and
+through them which clusters merge. It is meant for calibrating `-fine` and
+`-coarse`, where only the shape of the tree is being read — not for a taxonomy
+you mean to keep. Top levels are never batched.
+
+Like `config/rules.yaml`, both taxonomy files are gitignored: a list of
+someone's real subjects is a profile of a person.
 
 ## The watch path
 
