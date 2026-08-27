@@ -213,6 +213,34 @@ button.rrow:hover, button.rrow:focus-visible { background: var(--card); }
 /* Elements the views make clickable get the affordance from one place. */
 .hit { cursor: pointer; }
 .hit:hover { opacity: .75; }
+/* A drawn control has to look like one BEFORE it is touched, and a cursor
+   change is only visible to someone already pointing at it. The ring's nodes
+   therefore grow a halo on hover and on focus. It is drawn as a stroke, not an
+   outline: outline on an SVG shape is still unreliable across browsers, and a
+   box around a circle is the wrong shape anyway. Half-opacity on purpose — the
+   picked node's ring is set as an attribute and stays solid, and that
+   difference is what keeps "under the pointer" apart from "picked". The rule
+   names circle so it cannot reach the arcs' invisible hit paths, whose whole
+   job is to stay unpainted. */
+circle.hit:hover:not([aria-pressed="true"]),
+circle.hit:focus-visible:not([aria-pressed="true"]) {
+  stroke: var(--fg); stroke-width: 2; stroke-opacity: .55;
+}
+
+/* The graph's picker and its clear button. The picker is one focus stop that
+   holds the whole selection; the button only exists while something is
+   picked, because "clear" with nothing to clear is furniture. */
+.pick { display: flex; flex-wrap: wrap; align-items: baseline; gap: .4rem;
+  font-size: .8rem; color: var(--muted); margin: .2rem 0 0; }
+.pick select { font: inherit; color: var(--fg); background: var(--card);
+  border: 1px solid var(--line); border-radius: .3rem; padding: .1rem .3rem;
+  max-width: 100%; }
+.clear { margin-left: .4rem; font: inherit; font-size: .78rem; color: var(--bar);
+  background: none; border: 1px solid var(--line); border-radius: .3rem;
+  padding: .02rem .45rem; cursor: pointer; }
+.clear:hover, .clear:focus-visible { background: var(--card); }
+.clear[hidden] { display: none; }
+
 svg text { fill: var(--fg); font-family: inherit; }
 svg text.m { fill: var(--muted); }
 </style>

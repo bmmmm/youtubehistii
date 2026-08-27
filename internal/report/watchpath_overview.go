@@ -133,12 +133,15 @@ function buildCalendar(days) {
 
   // The strongest day of the WHOLE span sets the scale, so the year blocks
   // stay comparable with each other instead of each one being its own record.
+  // Keyed to the INDEX, not to the day: a cell has to be able to say which
+  // entry of D.days it is, because that is the coordinate a transition's day
+  // set is expressed in.
   let maxV = 1;
   const byDay = new Map();
-  for (const d of days) {
-    byDay.set(d[DY_ED], d);
+  days.forEach((d, i) => {
+    byDay.set(d[DY_ED], i);
     if (d[DY_VIEWS] > maxV) maxV = d[DY_VIEWS];
-  }
+  });
 
   const y0 = +dayDate(days[0][DY_ED]).slice(0, 4);
   const y1 = +dayDate(days[days.length - 1][DY_ED]).slice(0, 4);
@@ -188,13 +191,14 @@ function buildCalendar(days) {
       if (x + CELL > width) width = x + CELL;
 
       const rect = svg("rect", { x: x, y: cy, width: CELL, height: CELL, rx: 2 });
-      const d = byDay.get(ed);
-      if (!d) {
+      const di = byDay.get(ed);
+      if (di === undefined) {
         // Nothing was watched, so there is nothing to hover and nowhere to go.
         rect.setAttribute("fill", "var(--grid)");
         s.appendChild(rect);
         continue;
       }
+      const d = days[di];
 
       const area = d[DY_AREA], views = d[DY_VIEWS];
       const sess = d[DY_TO] - d[DY_FROM] + 1;
@@ -208,7 +212,7 @@ function buildCalendar(days) {
         views + (views === 1 ? " view" : " views") + " · " + esc(areaName(area)) +
         " · " + sess + (sess === 1 ? " sitting" : " sittings") + "</span>");
       clickTo(rect, "#/day/" + dayDate(ed));
-      cells.push({ el: rect, area: area, fill: fill, op: op });
+      cells.push({ el: rect, di: di, area: area, fill: fill, op: op });
       s.appendChild(rect);
     }
   }
@@ -222,22 +226,73 @@ function buildCalendar(days) {
   chart.appendChild(s);
   panel.appendChild(chart);
 
-  // filter(null) restores every cell. Greying out rather than hiding keeps
-  // the grid intact, so the answer stays readable as a shape in the year.
-  function filter(area) {
+  // filter(null) restores every cell. One entry point rather than two, because
+  // the graph has ONE selection and hands it over whole: an area keeps the days
+  // that area dominated, a pair arrives carrying the set of day indices that
+  // transition actually happened on. Greying out rather than hiding keeps the
+  // grid intact, so the answer stays readable as a shape in the year.
+  function filter(sel) {
+    const byArea = !!sel && sel.area != null;
     for (const c of cells) {
-      const on = area == null || c.area === area;
+      const on = !sel || (byArea ? c.area === sel.area : sel.days.has(c.di));
       c.el.setAttribute("fill", on ? c.fill : "var(--grid)");
       c.el.setAttribute("fill-opacity", on ? c.op : 1);
     }
-    filterNote.textContent = area == null ? "" :
-      " Right now only the days " + areaName(area) + " dominated keep their colour.";
+    filterNote.textContent = !sel ? "" : byArea
+      ? " Right now only the days " + areaName(sel.area) + " dominated keep their colour."
+      : " Right now only the " + sel.days.size.toLocaleString() +
+        (sel.days.size === 1 ? " day " : " days ") + sel.label +
+        " happened on keep their colour.";
   }
 
   return { panel: panel, filter: filter, cells: cells.length };
 }
 
 // ---- the transition graph ----------------------------------------------
+
+// daysOf answers "on which days did THIS transition actually happen" without a
+// single byte more on the payload: the sittings, their rows and the day each
+// sitting began on are all already there, so the answer is a walk, not a
+// shipment. 238 pairs would otherwise have cost a day list each.
+//
+// The walk has to be buildTransitions' walk exactly — the graph prints Go's
+// count and the calendar shows this walk's days, and two numbers about the same
+// pair may not come from two different rules:
+//
+//   - it never leaves a sitting: a jump over a night is not a transition;
+//   - it reads each sitting BACKWARDS, because rows are stored newest first and
+//     "followed by" is a statement about the order they were watched in;
+//   - an overlap view is stepped over with continue, so the previous area stays
+//     the previous area and the chain does not break;
+//   - a self-loop counts — it is the chain staying on its topic.
+//
+// One pass builds every pair at once, on the first pick and never again: 41k
+// rows is 6 ms, which is nothing once and far too much on every hover.
+let pairDays = null;
+
+function daysOf(from, to) {
+  if (!pairDays) {
+    pairDays = new Map();
+    const sess = D.sess || [], rows = D.rows || [];
+    for (const s of sess) {
+      const di = s[S_DAY], first = s[S_ROW] + 1;
+      let prev = -1, have = false;
+      for (let i = first + s[S_N] - 1; i >= first; i--) {
+        const r = rows[i];
+        if (isOverlap(r)) continue;
+        if (have) {
+          const k = prev + "|" + r[R_AREA];
+          let set = pairDays.get(k);
+          if (!set) { set = new Set(); pairDays.set(k, set); }
+          set.add(di);
+        }
+        prev = r[R_AREA];
+        have = true;
+      }
+    }
+  }
+  return pairDays.get(from + "|" + to) || new Set();
+}
 
 function buildGraph(cal) {
   const panel = $("div", "panel");
@@ -251,6 +306,11 @@ function buildGraph(cal) {
     (trans.length > shown.length
       ? "Showing the " + shown.length + " strongest of " + trans.length + " transitions."
       : "All " + trans.length + " transitions are drawn.")));
+  // The drawing has answered a click since the day it was drawn, and nothing
+  // said so — no outline, no hover, not a word — so on screen it read as a
+  // picture. An interaction nobody is told about is an interaction nobody has.
+  panel.appendChild($("p", "muted",
+    "The drawing is a control. Click an area to keep its arcs and the days it dominated; click an arc to keep that one transition and the days it actually happened on. The calendar above follows the pick, and the list under the ring is the same choice for the keyboard."));
 
   // Only areas with a main-lane view can carry a transition, so the ring is
   // exactly those. Sorted by size, ties by name: the ring has to look the
@@ -264,8 +324,15 @@ function buildGraph(cal) {
   // an image role would hide those seventeen buttons from anything that is not
   // a pointer. Seventeen focus stops are a list; the calendar's two thousand
   // would have been a wall, which is why only this chart carries them.
+  //
+  // The arcs are on the far side of that same line. Sixty of them is not a
+  // list any more, and sixty invisible hit paths as focus stops would bury the
+  // seventeen real ones plus every control after the chart. So an arc is a
+  // click and a hover, and the keyboard reaches a pair through the select
+  // under the drawing — one stop for all sixty, announced by name, and with
+  // type-ahead a pair is found faster there than by tabbing anyway.
   const s = svg("svg", {
-    role: "group", "aria-label": "pick an area to trace it through the calendar",
+    role: "group", "aria-label": "pick an area or a transition to trace it through the calendar",
     width: "100%", height: G_H,
     viewBox: "0 0 " + G_W + " " + G_H,
   });
@@ -303,7 +370,11 @@ function buildGraph(cal) {
     : 3);
 
   const gArcs = svg("g"), gHits = svg("g"), gNodes = svg("g");
-  const arcs = [];
+  const arcs = [], arcBy = new Map();
+  // One selection for the whole chart — an area or a pair, never both — and
+  // the arc the pointer happens to be over, which is a highlight and not a
+  // choice. Declared here because the handlers built below close over them.
+  let sel = null, hot = null;
 
   for (const t of shown) {
     const p = pos.get(t[0]), q = pos.get(t[1]);
@@ -334,16 +405,28 @@ function buildGraph(cal) {
     gArcs.appendChild(el);
 
     // A one-pixel stroke is not something a pointer can hit, so the tooltip
-    // hangs on an invisible fat copy underneath the nodes.
+    // and the click hang on an invisible fat copy underneath the nodes.
     const grab = svg("path", {
       d: d, fill: "none", stroke: "var(--fg)", "stroke-opacity": 0,
       "stroke-width": Math.max(7, widthOf(t[2])),
     });
+    grab.classList.add("hit");
     hover(grab, () => "<b>" + esc(areaName(t[0])) + " &#8594; " + esc(areaName(t[1])) +
       "</b><span class='m'>" + t[2].toLocaleString() +
-      (t[2] === 1 ? " time" : " times") + "</span>");
+      (t[2] === 1 ? " time" : " times") + " &middot; click for its days</span>");
+    const rec = { el: el, from: t[0], to: t[1], n: t[2] };
+    // A hairline under the pointer is easy to lose among sixty others, so the
+    // arc the tooltip is talking about is the one that lights up.
+    grab.addEventListener("mouseenter", () => { hot = rec; paintArcs(); });
+    grab.addEventListener("mouseleave", () => {
+      if (hot === rec) { hot = null; paintArcs(); }
+    });
+    // stopPropagation, or the click would travel on to the background handler
+    // that clears the selection and undo itself.
+    grab.addEventListener("click", ev => { ev.stopPropagation(); pick(pairSel(t[0], t[1])); });
     gHits.appendChild(grab);
-    arcs.push({ el: el, from: t[0], to: t[1] });
+    arcs.push(rec);
+    arcBy.set(t[0] + "|" + t[1], rec);
   }
 
   const nodes = new Map();
@@ -358,10 +441,12 @@ function buildGraph(cal) {
     c.classList.add("hit");
     hover(c, () => "<b>" + esc(areaName(a)) + "</b><span class='m'>" +
       av[a].toLocaleString() + " views · " +
-      (100 * av[a] / vSum).toFixed(1) + "% of the main lane</span>");
-    c.addEventListener("click", ev => { ev.stopPropagation(); pick(a); });
+      (100 * av[a] / vSum).toFixed(1) + "% of the main lane · click to trace it</span>");
+    c.addEventListener("click", ev => { ev.stopPropagation(); pick({ area: a }); });
     c.addEventListener("keydown", ev => {
-      if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); ev.stopPropagation(); pick(a); }
+      if (ev.key === "Enter" || ev.key === " ") {
+        ev.preventDefault(); ev.stopPropagation(); pick({ area: a });
+      }
     });
     gNodes.appendChild(c);
     nodes.set(a, c);
@@ -388,28 +473,106 @@ function buildGraph(cal) {
   panel.appendChild(s);
 
   // The selection changes the panel ABOVE this one, so it also has to be
-  // readable as a sentence — nobody should have to guess what is filtered.
+  // readable as a sentence — colour is not a state anyone can read back, and
+  // nobody should have to guess what the calendar is now showing.
   const state = $("p", "muted");
+  const stateText = $("span");
+  const clearEl = $("button", "clear", "show everything");
+  clearEl.type = "button";
+  clearEl.hidden = true;
+  clearEl.addEventListener("click", () => { sel = null; apply(); });
+  state.appendChild(stateText);
+  state.appendChild(clearEl);
   panel.appendChild(state);
 
-  let sel = null;
-  function pick(a) { sel = (sel === a ? null : a); apply(); }
-  function apply() {
+  // The same choice as a real control: one focus stop that holds the whole
+  // selection, and the only way to a pair that is not a pointer. It doubles as
+  // the list the drawing cannot be — sixty arcs are a shape, not a legend.
+  const picker = $("label", "pick");
+  picker.appendChild($("span", null, "or pick from the list:"));
+  const pickEl = $("select");
+  function opt(value, text) {
+    const o = $("option", null, text);
+    o.value = value;
+    return o;
+  }
+  pickEl.appendChild(opt("", "nothing picked — every day is showing"));
+  const gArea = $("optgroup");
+  gArea.label = "areas";
+  for (const a of idx) {
+    gArea.appendChild(opt("a:" + a,
+      areaName(a) + " · " + av[a].toLocaleString() + " views"));
+  }
+  pickEl.appendChild(gArea);
+  const gPair = $("optgroup");
+  gPair.label = "transitions";
+  for (const arc of arcs) {
+    gPair.appendChild(opt("p:" + arc.from + ":" + arc.to,
+      areaName(arc.from) + " → " + areaName(arc.to) + " · " + arc.n.toLocaleString() +
+      (arc.n === 1 ? " time" : " times")));
+  }
+  pickEl.appendChild(gPair);
+  pickEl.addEventListener("change", () => {
+    const v = pickEl.value.split(":");
+    sel = v[0] === "a" ? { area: +v[1] } : v[0] === "p" ? pairSel(+v[1], +v[2]) : null;
+    apply();
+  });
+  picker.appendChild(pickEl);
+  panel.appendChild(picker);
+
+  // pairSel is where the browser-side walk is paid for: the count is Go's, off
+  // the arc, and only the day set is derived here.
+  function pairSel(from, to) {
+    const arc = arcBy.get(from + "|" + to);
+    if (!arc) return null;
+    return {
+      from: from, to: to, n: arc.n, days: daysOf(from, to),
+      label: areaName(from) + " → " + areaName(to),
+    };
+  }
+  // Two selections are the same one when they name the same thing; the objects
+  // are rebuilt on every pick, so identity would never match and clicking the
+  // picked node again would never let go.
+  const same = (a, b) => !!a && !!b &&
+    a.area === b.area && a.from === b.from && a.to === b.to;
+  function pick(next) { sel = same(sel, next) ? null : next; apply(); }
+
+  function paintArcs() {
     for (const arc of arcs) {
-      const on = sel === null || arc.from === sel || arc.to === sel;
-      arc.el.setAttribute("stroke-opacity", on ? 0.45 : 0.08);
+      const on = sel === null ? true
+        : sel.days ? (arc.from === sel.from && arc.to === sel.to)
+        : (arc.from === sel.area || arc.to === sel.area);
+      arc.el.setAttribute("stroke-opacity", arc === hot ? 0.95 : (on ? 0.45 : 0.08));
     }
+  }
+
+  function apply() {
+    paintArcs();
     for (const [a, el] of nodes) {
-      el.setAttribute("stroke", a === sel ? "var(--fg)" : "var(--bg)");
-      el.setAttribute("stroke-width", a === sel ? 2 : 1);
-      el.setAttribute("aria-pressed", a === sel ? "true" : "false");
+      // A picked pair lights its two ends too, at half strength: the ring is
+      // where the areas are named, and an arc with no lit ends is a stripe.
+      const picked = sel !== null && sel.area === a;
+      const end = sel !== null && !!sel.days && (sel.from === a || sel.to === a);
+      el.setAttribute("stroke", picked || end ? "var(--fg)" : "var(--bg)");
+      el.setAttribute("stroke-width", picked ? 3 : (end ? 2 : 1));
+      el.setAttribute("stroke-opacity", end && !picked ? 0.5 : 1);
+      el.setAttribute("aria-pressed", picked ? "true" : "false");
     }
     cal.filter(sel);
-    state.textContent = sel === null
-      ? "Nothing picked — click an area to keep only its arcs and only the days it dominated."
-      : "Picked: " + areaName(sel) + " — its arcs and its days only. Click it again, or the background, to let the rest back in.";
+    pickEl.value = sel === null ? ""
+      : sel.days ? "p:" + sel.from + ":" + sel.to : "a:" + sel.area;
+    clearEl.hidden = sel === null;
+    stateText.textContent = sel === null
+      ? "Nothing picked — the calendar above is showing every day. Click an area, or an arc, to cut it down."
+      : sel.days
+        ? "Picked: " + sel.label + ", " + sel.n.toLocaleString() +
+          (sel.n === 1 ? " time" : " times") + ", on " + sel.days.size.toLocaleString() +
+          (sel.days.size === 1 ? " day" : " days") +
+          " — the calendar above is showing those days only."
+        : "Picked: " + areaName(sel.area) +
+          " — its arcs, and the days it dominated in the calendar above.";
   }
-  s.addEventListener("click", () => { if (sel !== null) pick(sel); });
+  s.addEventListener("click", () => { if (sel !== null) { sel = null; apply(); } });
   apply();
 
   return panel;

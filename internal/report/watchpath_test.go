@@ -932,6 +932,100 @@ func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 	}
 }
 
+// The graph asks "on which days did this pair happen" by walking the payload
+// in the BROWSER — not one byte about it is shipped, because the sittings,
+// their rows and the day each one began on are already there. That only holds
+// while the payload keeps carrying those three things at the offsets the page
+// names, so this test re-runs the walk over the payload alone and checks it
+// lands on buildTransitions' numbers. If it ever stops matching, the graph and
+// the calendar are telling two different stories about the same pair.
+func TestPayloadCarriesTheTransitionWalk(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p, nil)
+
+	// The offsets the page declares as R_AREA / R_FLAGS and S_ROW / S_N / S_DAY.
+	// A silent move here is exactly the drift this test exists to catch.
+	const rArea, rFlags = 3, 9
+	const sRow, sN, sDay = 0, 3, 5
+
+	// At least one overlap view has to reach the payload, or the step-over
+	// rule below would be asserted against nothing.
+	overlaps := 0
+	for _, row := range d.Rows {
+		if row[0] == rowView && row[rFlags].(int)&1 != 0 {
+			overlaps++
+		}
+	}
+	if overlaps == 0 {
+		t.Fatal("fixture drifted: no row carries the overlap flag")
+	}
+
+	// buildTransitions' walk, run the way the browser runs it: never leave a
+	// sitting, read it backwards because rows are stored newest first, step
+	// over an overlap without breaking the chain, keep self-loops.
+	counts := map[[2]int]int{}
+	days := map[[2]int]map[int]bool{}
+	for si, s := range d.Sess {
+		row, n, di := s[sRow].(int), s[sN].(int), s[sDay].(int)
+		if di < 0 || di >= len(d.Days) {
+			t.Fatalf("sess[%d] names day %d, but days has %d entries", si, di, len(d.Days))
+		}
+		prev, have := -1, false
+		for i := row + n; i > row; i-- {
+			r := d.Rows[i]
+			if r[rFlags].(int)&1 != 0 {
+				continue
+			}
+			area := r[rArea].(int)
+			if have {
+				k := [2]int{prev, area}
+				counts[k]++
+				if days[k] == nil {
+					days[k] = map[int]bool{}
+				}
+				days[k][di] = true
+			}
+			prev, have = area, true
+		}
+	}
+
+	if len(counts) != len(d.Trans) {
+		t.Fatalf("the walk found %d pairs, the payload lists %d", len(counts), len(d.Trans))
+	}
+	for _, tr := range d.Trans {
+		k := [2]int{tr[0], tr[1]}
+		if counts[k] != tr[2] {
+			t.Errorf("%s -> %s: the walk counts %d, trans says %d",
+				d.Areas[tr[0]], d.Areas[tr[1]], counts[k], tr[2])
+		}
+		// A pair happened at least once on some day and never on more days
+		// than it happened times — the day set is what filters the calendar.
+		if len(days[k]) == 0 || len(days[k]) > counts[k] {
+			t.Errorf("%s -> %s: %d days carry %d transitions",
+				d.Areas[tr[0]], d.Areas[tr[1]], len(days[k]), counts[k])
+		}
+	}
+
+	// The rule easiest to get wrong is the overlap one: stepping over a view
+	// must not end the chain. The fixture's documentary has music running
+	// inside it, and what has to survive that is the documentary following
+	// itself — on the one day it happened.
+	fa := -1
+	for i, name := range d.Areas {
+		if name == "film-animation" {
+			fa = i
+		}
+	}
+	if fa < 0 {
+		t.Fatal("fixture drifted: no film-animation area on the payload")
+	}
+	loop := [2]int{fa, fa}
+	if counts[loop] != 1 || len(days[loop]) != 1 {
+		t.Errorf("the self-loop across the overlap is %d times on %d days, want 1 and 1",
+			counts[loop], len(days[loop]))
+	}
+}
+
 // clusterByName finds a node by name among siblings, so a test can say what
 // it is looking for instead of counting positions.
 func clusterByName(cs []Cluster, name string) *Cluster {
