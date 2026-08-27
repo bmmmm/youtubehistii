@@ -43,12 +43,13 @@ type pathData struct {
 	// The aggregates the other views run on. They index into rows, days and
 	// areas rather than repeating anything: the timeline is the one copy of
 	// the data, every other view is a lens on it.
-	Sess      [][]any    `json:"sess"` // parallel to Path.Sessions, newest first
-	Days      [][]any    `json:"days"` // parallel to Path.Days, oldest first
-	Trans     [][]int    `json:"trans"`
-	AreaViews []int      `json:"areaViews"` // parallel to Areas: main-lane views per area
-	Clusters  [][]any    `json:"clusters"`  // area / subject / channel, most-watched first
-	Stats     *statsData `json:"stats"`
+	Sess      [][]any     `json:"sess"` // parallel to Path.Sessions, newest first
+	Days      [][]any     `json:"days"` // parallel to Path.Days, oldest first
+	Trans     [][]int     `json:"trans"`
+	AreaViews []int       `json:"areaViews"` // parallel to Areas: main-lane views per area
+	Clusters  [][]any     `json:"clusters"`  // area / subject / channel, most-watched first
+	Stats     *statsData  `json:"stats"`
+	Report    *reportData `json:"report,omitempty"` // nil when no Stats were handed in
 }
 
 // clusterNodes turns the topic tree into [name, views, durationS, children],
@@ -85,6 +86,123 @@ type statsData struct {
 	DeepestRabbitN int     `json:"deepestRabbitN"`
 	BusiestDay     int     `json:"busiestDay"`
 	BusiestDayN    int     `json:"busiestDayN"`
+}
+
+// reportData is the aggregate report as the report VIEW reads it — the same
+// rule statsData follows: only the numbers a view actually puts on screen
+// travel, and nothing that already rides at the top level of the payload.
+//
+// Two conversions happen here rather than on the page. Durations become whole
+// seconds, because JSON has no duration and every other duration on this page
+// is one; and every channel name becomes an index into the payload's one Chans
+// table, because a name a timeline row already carries must not ride twice.
+type reportData struct {
+	Views   int   `json:"views"`  // ALL classified views, including the undated
+	Unique  int   `json:"unique"` // distinct video ids
+	DurS    int   `json:"durS"`   // upper bound over every view, in seconds
+	Sources []int `json:"sources"`
+	NoID    int   `json:"noID"` // views with no video link at all
+	Gone    int   `json:"gone"` // views on videos no longer on YouTube
+
+	// Positional rows, the clusterNodes idiom: the key names would outweigh
+	// the numbers they label. The comments are the layout, and the page names
+	// the same offsets as constants.
+	Topics  [][]any `json:"topics"`  // name, mode, views, durS, [subjects]
+	Months  [][]any `json:"months"`  // month, views per mode
+	Chans   [][]any `json:"chans"`   // channel, top topic, views, durS, subscribed
+	Subs    [][]any `json:"subs"`    // channel, top topic, views, durS, last watched
+	Unclear []int   `json:"unclear"` // channels carrying the most unclear views
+
+	HasSubs  bool `json:"hasSubs"`
+	SubViews int  `json:"subViews"`
+	SubDurS  int  `json:"subDurS"`
+	DeadSubs int  `json:"deadSubs"`
+}
+
+// topChannels is where the channel table stops being a top list and starts
+// being a directory. The old HTML report drew the same 25.
+const topChannels = 25
+
+// capChannels keeps the channel list to the n most-watched.
+func capChannels(cs []ChannelAgg, n int) []ChannelAgg {
+	if len(cs) > n {
+		return cs[:n]
+	}
+	return cs
+}
+
+// durS turns an upper-bound hour figure back into whole seconds.
+func durS(hours float64) int { return int(hours*3600 + 0.5) }
+
+// epochDay is the grid coordinate of a wall-clock date — the same number
+// DayAgg.EpochDay carries, so the page formats both with one helper.
+func epochDay(t time.Time) int {
+	y, m, d := t.Date()
+	return int(time.Date(y, m, d, 0, 0, 0, 0, time.UTC).Unix() / 86400)
+}
+
+// buildReportData folds the aggregate stats into the payload. It borrows the
+// interns of the timeline it travels with, so a channel already named by a
+// view row costs nothing here; that is only safe because interning appends —
+// an index handed out earlier never moves.
+//
+// st == nil is the whole "no report" case: the block stays off the payload,
+// and the page then offers neither the card nor the route.
+func buildReportData(st *Stats, chans, modes *intern) *reportData {
+	if st == nil {
+		return nil
+	}
+	r := &reportData{
+		Views:  st.Views,
+		Unique: st.UniqueVideos,
+		DurS:   durS(st.HoursUpper),
+		// Fixed order — rule, llm, youtube category, still open — so the four
+		// counts cost four numbers instead of four keys.
+		Sources:  []int{st.Sources["rule"], st.Sources["llm"], st.Sources["category"], st.Sources["unclassified"]},
+		NoID:     st.NoID,
+		Gone:     st.Unavailable,
+		HasSubs:  st.HasSubs,
+		SubViews: st.SubbedViews,
+		SubDurS:  durS(st.SubbedHours),
+		DeadSubs: st.DeadSubs,
+	}
+	for _, t := range st.Topics {
+		row := []any{t.Topic, modes.get(t.Mode), t.Views, durS(t.Hours)}
+		if len(t.Subs) > 0 {
+			kids := make([][]any, 0, len(t.Subs))
+			for _, s := range t.Subs {
+				kids = append(kids, []any{s.Sub, modes.get(s.Mode), s.Views, durS(s.Hours)})
+			}
+			row = append(row, kids)
+		}
+		r.Topics = append(r.Topics, row)
+	}
+	// The per-month counts are parallel to ModeOrder, which newIntern seeded
+	// the Modes table with — so column i is D.modes[i] on the page, and the
+	// month rows carry no mode names of their own.
+	for _, m := range st.Months {
+		views := make([]int, len(ModeOrder))
+		for i, mode := range ModeOrder {
+			views[i] = m.ModeViews[mode]
+		}
+		r.Months = append(r.Months, []any{m.Month, views})
+	}
+	for _, c := range capChannels(st.Channels, topChannels) {
+		r.Chans = append(r.Chans, []any{chans.get(c.Name), c.TopTopic, c.Views, durS(c.Hours), c.Subscribed})
+	}
+	for _, s := range st.Subs {
+		// -1 is "never watched in this export"; the page says so in words
+		// rather than printing a date nothing happened on.
+		last := -1
+		if !s.LastWatched.IsZero() {
+			last = epochDay(s.LastWatched.Local())
+		}
+		r.Subs = append(r.Subs, []any{chans.get(s.Title), s.TopTopic, s.Views, durS(s.Hours), last})
+	}
+	for _, name := range st.UnclearNames {
+		r.Unclear = append(r.Unclear, chans.get(name))
+	}
+	return r
 }
 
 // intern hands out stable indices for repeated strings.
@@ -124,7 +242,7 @@ func areaHue(area string) int {
 // buildPathData flattens the path into rows. The row list is built in Go on
 // purpose: the page then owns nothing but scroll positions, and every rule
 // that decides what a row MEANS stays in tested code.
-func buildPathData(p *Path) *pathData {
+func buildPathData(p *Path, st *Stats) *pathData {
 	d := &pathData{
 		Sessions: len(p.Sessions),
 		Views:    p.Views,
@@ -233,6 +351,10 @@ func buildPathData(p *Path) *pathData {
 		BusiestDay:     p.Stats.BusiestDay,
 		BusiestDayN:    p.Stats.BusiestDayViews,
 	}
+	// Last, because it is the one part that may still put a name into a lookup
+	// table: a subscription never watched appears in no view row, and a
+	// report-only mode in no timeline row.
+	d.Report = buildReportData(st, chans, modes)
 
 	d.Chans, d.Areas, d.Subs, d.Modes, d.Edges = chans.list, areas.list, subs.list, modes.list, edges.list
 	for _, a := range d.Areas {
@@ -241,10 +363,15 @@ func buildPathData(p *Path) *pathData {
 	return d
 }
 
-// RenderWatchPath produces the self-contained timeline page — same rules as
-// RenderHTML: system fonts, no external assets, light/dark by preference.
-func RenderWatchPath(p *Path, generated time.Time) ([]byte, error) {
-	data := buildPathData(p)
+// RenderWatchPath produces the self-contained page: system fonts, no external
+// assets, light/dark by preference. It is the only HTML this package writes —
+// the aggregate report is a view of this page, not a second file, which is why
+// it takes the stats alongside the path.
+//
+// st may be nil: the page then renders without the report view, which is what
+// keeps the shell independent of an aggregation it does not need.
+func RenderWatchPath(p *Path, st *Stats, generated time.Time) ([]byte, error) {
+	data := buildPathData(p, st)
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return nil, err

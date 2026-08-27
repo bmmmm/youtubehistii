@@ -2,14 +2,14 @@
 
 package report
 
-// The watch path page carries five views of one timeline, so it is assembled
+// The watch path page carries every view of one export, so it is assembled
 // from parts rather than written as one string: this file holds the shell —
 // markup, style, shared drawing helpers, the router and the flat list — and
-// four drawing files hold the rest. watchpath_overview.go has the calendar and
+// five drawing files hold the rest. watchpath_overview.go has the calendar and
 // the transition graph, watchpath_detail.go the day and the sitting,
-// watchpath_cluster.go the topic tree, watchpath_intro.go the entry cards. One
-// file with all of it would be unreadable, and the seams here are the seams
-// the page itself has.
+// watchpath_cluster.go the topic tree, watchpath_reportview.go the aggregate
+// report, watchpath_intro.go the entry cards. One file with all of it would be
+// unreadable, and the seams here are the seams the page itself has.
 //
 // Two rules bind every part, including the drawing files:
 //
@@ -18,7 +18,7 @@ package report
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
 var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
-	overviewJS + detailJS + clusterJS + introJS + pageTail
+	overviewJS + detailJS + clusterJS + reportJS + introJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -111,9 +111,10 @@ a.tile:hover { background: var(--card2); outline: 1px solid var(--line); }
 .mini circle, .mini rect, .mini path, .mini line, .mini g { transform-box: fill-box;
   transform-origin: center; }
 
-/* Four motions, one per view, each saying what that view is: a circle opening
-   up, a day being swept, a path being walked, a list running on. Slow and
-   low-contrast on purpose — this is a hint, not a carousel. */
+/* Four motions, each saying what the view behind the card is: a circle opening
+   up, a day being swept, a path being walked, a list running on. The report
+   card borrows the travelling stroke for its months. Slow and low-contrast on
+   purpose — this is a hint, not a carousel. */
 @keyframes wayGrow { 0%, 100% { transform: scale(1); opacity: .5; }
   50% { transform: scale(1.22); opacity: 1; } }
 @keyframes waySweep { from { transform: translateX(0); } to { transform: translateX(152px); } }
@@ -183,6 +184,31 @@ a.tile:hover { background: var(--card2); outline: 1px solid var(--line); }
    one sitting is short enough that nothing needs virtualising. */
 .stack { display: flex; flex-direction: column; gap: .3rem; margin-top: .6rem; }
 .stack .lane2 { margin-left: 2rem; }
+
+/* The report's topic rows. A row with subjects under it is a real button, so
+   the toggle answers the keyboard and announces its state without any code;
+   one with none is a plain row that happens to line up with it. */
+.rt { margin-top: .7rem; }
+.rrow { display: flex; align-items: center; gap: .5rem; width: 100%;
+  padding: .3rem .4rem; border: 0; border-radius: .3rem; background: none;
+  color: inherit; font: inherit; text-align: left; }
+button.rrow { cursor: pointer; }
+button.rrow:hover, button.rrow:focus-visible { background: var(--card); }
+.rcar { width: .8rem; flex-shrink: 0; font-size: .65rem; color: var(--muted); }
+.rname { flex: 1; min-width: 4rem; font-size: .88rem;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rn { flex-shrink: 0; font-size: .72rem; color: var(--muted); }
+.rnum { flex-shrink: 0; width: 4.8rem; text-align: right; white-space: nowrap;
+  font-variant-numeric: tabular-nums; font-size: .76rem; color: var(--muted); }
+.rbar { flex-shrink: 0; width: 7rem; height: .5rem; border-radius: .25rem; background: var(--line); }
+.rfill { height: 100%; border-radius: .25rem; background: var(--bar); }
+.rsubs { margin: 0 0 .4rem 1.3rem; border-left: 1px solid var(--line); }
+.rsubs[hidden] { display: none; }
+.rlink { color: var(--bar); }
+.runcl { margin: .5rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
+/* On a phone the bar is the first thing that has to go: the number next to it
+   says the same, and a 3 rem bar says nothing. */
+@media (max-width: 30rem) { .rbar { display: none; } .rnum { width: 4rem; } }
 
 /* Elements the views make clickable get the affordance from one place. */
 .hit { cursor: pointer; }
@@ -535,6 +561,10 @@ function crumbs(trail, here) {
     { id: "topics", text: "topics", hash: "#/topics" },
     { id: "list", text: "all views (" + D.views.toLocaleString() + ")", hash: "#/list" },
   ];
+  // The report is a sibling too — the same export summed instead of walked.
+  // Only when the numbers actually travelled: a link to a view that is not on
+  // the payload is a promise the page cannot keep.
+  if (D.report) sides.splice(1, 0, { id: "report", text: "report", hash: "#/report" });
   for (const s of sides) {
     if (s.id === here) continue;
     const a = $("a", "alt", s.text);
@@ -567,6 +597,13 @@ function route() {
     crumbs(trail, "topics");
     scrollTo(0, 0);
     teardown = renderClusters(viewEl, area, sub) || null;
+    return;
+  }
+  if (parts[0] === "report") {
+    crumbs([{ text: "overview", hash: "/" }, { text: "report" }], "report");
+    scrollTo(0, 0);
+    if (!D.report) { notFound(viewEl, "the report"); return; }
+    teardown = renderReport(viewEl) || null;
     return;
   }
   if (parts[0] === "day" && parts[1]) {

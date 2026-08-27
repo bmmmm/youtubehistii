@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
 	"github.com/bmmmm/youtubehistii/internal/report"
@@ -40,14 +39,6 @@ func cmdReport(args []string) error {
 	if err := os.MkdirAll(p.outDir(), 0o755); err != nil {
 		return err
 	}
-	htmlPath := filepath.Join(p.outDir(), "report.html")
-	html, err := report.RenderHTML(st, time.Now())
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(htmlPath, html, 0o644); err != nil {
-		return err
-	}
 	csvPath := filepath.Join(p.outDir(), "report.csv")
 	cf, err := os.Create(csvPath)
 	if err != nil {
@@ -62,6 +53,10 @@ func cmdReport(args []string) error {
 	}
 
 	fmt.Print(report.RenderText(st, !*noNames))
-	fmt.Printf("\nwrote %s and %s\n", htmlPath, csvPath)
+	fmt.Printf("\nwrote %s\n", csvPath)
+	// There is no report.html any more: the same numbers are a VIEW of the
+	// watch path page, next to the timeline, the calendar and the topic tree.
+	fmt.Printf("the same numbers to look at: run \"watchpath\", then open %s at #/report\n",
+		filepath.Join(p.outDir(), "watchpath.html"))
 	return nil
 }

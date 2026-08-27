@@ -39,7 +39,7 @@ function card(hash, heading, line, art) {
   return a;
 }
 
-// ---- the four miniatures ------------------------------------------------
+// ---- the miniatures -----------------------------------------------------
 
 // The topic tree, packed by the same code the full view uses — so the card is
 // literally a smaller version of what the click leads to, not an impression
@@ -161,6 +161,47 @@ function miniList() {
   return s;
 }
 
+// The months of the report, as bars — the same aggregate the report draws in
+// full, at the size of a sparkline. The outline travels because the view
+// behind this card spans years rather than a moment; it traces the tops of
+// the bars, so it repeats the drawing instead of claiming anything new.
+function miniReport() {
+  const s = mini("the export summed up");
+  const ms = (D.report && D.report.months) || [];
+  if (!ms.length) return s;
+
+  const tot = ms.map(monthTotal);
+  let max = 1;
+  for (const n of tot) max = Math.max(max, n);
+  const L = 5, W = MW - 10, TOP = 8, BASE = MH - 6;
+  const step = W / ms.length;
+  const bw = Math.max(1, Math.min(7, step - 1));
+  const yOf = n => BASE - (n / max) * (BASE - TOP);
+
+  const pts = [];
+  ms.forEach((m, i) => {
+    const x = L + i * step;
+    let bottom = BASE;
+    m[RM_MODES].forEach((v, mi) => {
+      if (!v) return;
+      const h = Math.max(0.6, (v / max) * (BASE - TOP));
+      bottom -= h;
+      s.appendChild(svg("rect", {
+        x: x.toFixed(2), y: bottom.toFixed(2), width: bw.toFixed(2), height: h.toFixed(2),
+        fill: "var(--" + (D.modes[mi] || "unclear") + ")", "fill-opacity": 0.75,
+      }));
+    });
+    pts.push((x + bw / 2).toFixed(1) + "," + yOf(tot[i]).toFixed(1));
+  });
+  if (pts.length > 1) {
+    s.appendChild(svg("polyline", {
+      class: "draw", fill: "none", stroke: "var(--bar)", "stroke-width": 1.6,
+      points: pts.join(" "),
+    }));
+  }
+  return s;
+}
+
 // ---- the strip ----------------------------------------------------------
 
 // introCards builds one card per view that is NOT already on the overview.
@@ -169,6 +210,15 @@ function miniList() {
 function introCards(st) {
   const ways = $("div", "ways");
 
+  // First, because it is the widest cut: everything at once, as numbers. It
+  // used to be a separate file nobody arrived at this page from.
+  if (D.report) {
+    const R = D.report;
+    ways.appendChild(card("#/report", "the report",
+      R.views.toLocaleString() + " views summed up — topics, months, channels" +
+      (R.hasSubs ? " and subscriptions" : "") + ", with every hour an upper bound.",
+      miniReport()));
+  }
   if ((D.clusters || []).length) {
     // Only the two levels that can be counted without lying: the leaf count is
     // area/subject/channel triples, not distinct channels, so it is left out
