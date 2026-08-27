@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
 
 // pathT0 is local on purpose. BuildPath reads every timestamp in wall-clock
@@ -289,7 +290,9 @@ func TestRenderWatchPathIsSelfContained(t *testing.T) {
 		view(5*time.Minute, "sports", 300),
 		view(90*time.Minute, "gaming", 300),
 	})
-	html, err := RenderWatchPath(p, pathT0)
+	// With the stats, so the guard covers the report view too — it is the
+	// biggest single block of markup on the page.
+	html, err := RenderWatchPath(p, Aggregate(pathFixture(), nil), pathT0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,7 +347,10 @@ func TestRenderWatchPathEscapesTitles(t *testing.T) {
 	nasty := `</script><img src=x onerror=alert(1)>`
 	rows := []classify.Verdict{view(0, "music", 300)}
 	rows[0].Title = nasty
-	html, err := RenderWatchPath(BuildPath(rows), pathT0)
+	// The channel name is the report view's half of the same problem: it
+	// travels in the shared Chans table, which the report block indexes into.
+	rows[0].Channel = nasty
+	html, err := RenderWatchPath(BuildPath(rows), Aggregate(rows, nil), pathT0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -385,6 +391,148 @@ func mustPayload(t *testing.T, html []byte) []byte {
 	return rest[:j]
 }
 
+// num reads a number back out of a positional row. Everything inside a
+// [][]any comes back from JSON as float64, and a row is read by offset.
+func num(t *testing.T, v any) int {
+	t.Helper()
+	f, ok := v.(float64)
+	if !ok {
+		t.Fatalf("not a number: %#v", v)
+	}
+	return int(f)
+}
+
+// The report is a VIEW of this page now, so its numbers ride on the same
+// payload. They have to be the numbers Aggregate produced — one export may not
+// read as two different sets of figures depending on which view you open.
+func TestRenderWatchPathCarriesTheReport(t *testing.T) {
+	rows := []classify.Verdict{
+		view(0, "music/live", 300),
+		view(5*time.Minute, "music/live", 300),
+		view(70*time.Minute, "dev/talks", 600),
+		// No timestamp: no place on a timeline, but it is a view and the
+		// report counts it. That difference is the point of the first check.
+		{VideoID: "undated", Title: "undated", Channel: "chan", Topic: "music/live"},
+	}
+	subs := []takeout.Subscription{{ChannelID: "UCnever", Title: "Never Watched"}}
+	st := Aggregate(rows, subs)
+
+	html, err := RenderWatchPath(BuildPath(rows), st, pathT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var d pathData
+	if err := json.Unmarshal(mustPayload(t, html), &d); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	r := d.Report
+	if r == nil {
+		t.Fatal("the payload carries no report block")
+	}
+
+	if r.Views != st.Views || r.Views != 4 {
+		t.Errorf("report views = %d, want %d from the stats", r.Views, st.Views)
+	}
+	if d.Views != 3 {
+		t.Errorf("timeline views = %d, want 3 — the undated view has no place there", d.Views)
+	}
+	if r.Unique != st.UniqueVideos || r.DurS != durS(st.HoursUpper) {
+		t.Errorf("unique = %d/%d, durS = %d/%d", r.Unique, st.UniqueVideos, r.DurS, durS(st.HoursUpper))
+	}
+
+	// Topics: area, mode as an index into the shared table, views, seconds,
+	// and the subjects underneath.
+	if len(r.Topics) != len(st.Topics) {
+		t.Fatalf("topics = %d, want %d", len(r.Topics), len(st.Topics))
+	}
+	top, want := r.Topics[0], st.Topics[0]
+	if top[0] != want.Topic || num(t, top[2]) != want.Views || num(t, top[3]) != durS(want.Hours) {
+		t.Errorf("top topic = %v, want %q with %d views", top, want.Topic, want.Views)
+	}
+	if got := d.Modes[num(t, top[1])]; got != want.Mode {
+		t.Errorf("top topic mode = %q, want %q", got, want.Mode)
+	}
+	kids, ok := top[4].([]any)
+	if !ok || len(kids) != len(want.Subs) {
+		t.Fatalf("subjects under %q = %#v, want %d", want.Topic, top[4], len(want.Subs))
+	}
+	kid := kids[0].([]any)
+	if kid[0] != want.Subs[0].Sub || num(t, kid[2]) != want.Subs[0].Views {
+		t.Errorf("first subject = %v, want %q with %d views", kid, want.Subs[0].Sub, want.Subs[0].Views)
+	}
+
+	// Months: one bucket, and the per-mode counts are parallel to ModeOrder,
+	// which is what lets the page name a column through the modes table.
+	if len(r.Months) != 1 || r.Months[0][0] != st.Months[0].Month {
+		t.Fatalf("months = %v, want one bucket %q", r.Months, st.Months[0].Month)
+	}
+	counts, ok := r.Months[0][1].([]any)
+	if !ok || len(counts) != len(ModeOrder) {
+		t.Fatalf("month counts = %#v, want one per mode", r.Months[0][1])
+	}
+	total := 0
+	for i, c := range counts {
+		if n := num(t, c); n > 0 {
+			total += n
+			if d.Modes[i] != ModeOrder[i] {
+				t.Errorf("month column %d is %q, but the modes table says %q", i, ModeOrder[i], d.Modes[i])
+			}
+		}
+	}
+	if total != d.Views {
+		t.Errorf("the months hold %d views, the timeline %d", total, d.Views)
+	}
+
+	// Channel names ride in the ONE lookup table, watched or merely subscribed.
+	if len(r.Chans) != len(st.Channels) {
+		t.Fatalf("channels = %d, want %d", len(r.Chans), len(st.Channels))
+	}
+	if got := d.Chans[num(t, r.Chans[0][0])]; got != st.Channels[0].Name {
+		t.Errorf("top channel = %q, want %q", got, st.Channels[0].Name)
+	}
+	if len(r.Subs) != 1 || !r.HasSubs || r.DeadSubs != 1 {
+		t.Fatalf("subscriptions = %v, hasSubs = %v, dead = %d", r.Subs, r.HasSubs, r.DeadSubs)
+	}
+	if got := d.Chans[num(t, r.Subs[0][0])]; got != "Never Watched" {
+		t.Errorf("subscription title = %q, want the interned name", got)
+	}
+	if last := num(t, r.Subs[0][4]); last != -1 {
+		t.Errorf("a never-watched subscription must carry no date, got %d", last)
+	}
+
+	// And the view is reachable: a route and a card, not just a payload.
+	page := string(html)
+	for _, want := range []string{`parts[0] === "report"`, `card("#/report"`, "renderReport"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page never offers the report view: %q missing", want)
+		}
+	}
+}
+
+// Without stats the block stays off the payload entirely — the shell has to
+// render, and the page must offer neither the card nor the route.
+func TestRenderWatchPathWithoutStats(t *testing.T) {
+	p := BuildPath(pathFixture())
+	html, err := RenderWatchPath(p, nil, pathT0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := mustPayload(t, html)
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &raw); err != nil {
+		t.Fatalf("payload is not valid JSON: %v", err)
+	}
+	if _, ok := raw["report"]; ok {
+		t.Error("no stats were handed in, but the payload carries a report key")
+	}
+	if _, ok := raw["stats"]; !ok {
+		t.Error("the timeline's own stats went missing")
+	}
+	if !strings.Contains(string(html), "watch path") || len(html) < 10000 {
+		t.Errorf("the page did not render without stats (%d bytes)", len(html))
+	}
+}
+
 func TestPathDataInternsRepeats(t *testing.T) {
 	// The same channel across many views must cost one string, not many —
 	// that is the whole reason for the lookup tables.
@@ -394,7 +542,7 @@ func TestPathDataInternsRepeats(t *testing.T) {
 		v.Channel = "One Channel"
 		rows = append(rows, v)
 	}
-	d := buildPathData(BuildPath(rows))
+	d := buildPathData(BuildPath(rows), nil)
 	if len(d.Chans) != 1 || d.Chans[0] != "One Channel" {
 		t.Errorf("channels = %v, want one entry", d.Chans)
 	}
@@ -648,7 +796,7 @@ func TestEmptyPathHasNoIndices(t *testing.T) {
 		if st.Views != 0 || st.Sessions != 0 || st.HoursUpper != 0 || st.BusiestDayViews != 0 {
 			t.Errorf("%s: stats = %+v", name, st)
 		}
-		d := buildPathData(p)
+		d := buildPathData(p, nil)
 		if d.Stats == nil || d.Stats.BusiestDay != -1 {
 			t.Errorf("%s: payload stats = %+v", name, d.Stats)
 		}
@@ -666,7 +814,7 @@ func TestPathDataSessionsPointAtTheirRows(t *testing.T) {
 	// rows behind it are that sitting's views, in the same order. Nothing is
 	// copied, so if this drifts every other view shows the wrong videos.
 	p := BuildPath(pathFixture())
-	d := buildPathData(p)
+	d := buildPathData(p, nil)
 	if len(d.Sess) != len(p.Sessions) {
 		t.Fatalf("sess = %d entries, sessions = %d", len(d.Sess), len(p.Sessions))
 	}
@@ -699,7 +847,7 @@ func TestPathDataSessionsPointAtTheirRows(t *testing.T) {
 
 func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 	p := BuildPath(pathFixture())
-	d := buildPathData(p)
+	d := buildPathData(p, nil)
 
 	if len(d.Days) != len(p.Days) {
 		t.Fatalf("days = %d entries, want %d", len(d.Days), len(p.Days))
@@ -936,7 +1084,7 @@ func TestClusterTreeEmpty(t *testing.T) {
 func TestPathDataSerialisesTheClusterTree(t *testing.T) {
 	// Leaves carry three fields, everything above carries a fourth that holds
 	// the children — that shape is what the packing walks.
-	d := buildPathData(BuildPath(pathFixture()))
+	d := buildPathData(BuildPath(pathFixture()), nil)
 	if len(d.Clusters) != len(BuildPath(pathFixture()).Clusters) {
 		t.Fatalf("areas = %d serialised, want %d", len(d.Clusters), len(BuildPath(pathFixture()).Clusters))
 	}

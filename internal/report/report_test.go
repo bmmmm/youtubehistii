@@ -100,22 +100,9 @@ func TestMonthsFollowWallClock(t *testing.T) {
 	}
 }
 
-func TestRenderHTML(t *testing.T) {
-	rows, subs := sampleData()
-	st := Aggregate(rows, subs)
-	html, err := RenderHTML(st, time.Date(2026, 8, 22, 3, 0, 0, 0, time.UTC))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, want := range []string{"gaming", "rust 2", "media.ccc.de", "never watched", "upper bound", "Mystery"} {
-		if !bytes.Contains(html, []byte(want)) {
-			t.Errorf("html misses %q", want)
-		}
-	}
-	if bytes.Contains(html, []byte("http://")) || bytes.Contains(html, []byte("https://")) {
-		t.Error("report must be self-contained — found external URL")
-	}
-}
+// The report renders no HTML of its own any more — it is a view of the watch
+// path page, and the guard on it lives in watchpath_test.go with the rest of
+// that page.
 
 func TestWriteCSV(t *testing.T) {
 	rows, subs := sampleData()

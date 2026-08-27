@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,11 +11,14 @@ import (
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
 	"github.com/bmmmm/youtubehistii/internal/report"
+	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
 
-// cmdWatchPath renders the timeline view — the same classified views as
-// "report", read along the time axis instead of aggregated. Its own file:
-// report.html answers what was watched, this one answers how.
+// cmdWatchPath renders the one page this tool produces: the classified views
+// along the time axis, with the aggregate report as a view of the same page at
+// #/report. "report" itself writes the CSV and the terminal summary — the two
+// used to be separate files, and whoever opened the report never learned that
+// the timeline, the calendar and the topic tree existed.
 func cmdWatchPath(args []string) error {
 	fs, dataDir := newFlagSet("watchpath")
 	useTaxonomy := fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path")
@@ -30,13 +34,20 @@ func cmdWatchPath(args []string) error {
 			return err
 		}
 	}
+	// The subscription export is optional; without it the report view simply
+	// has no subscription panel.
+	subs, err := readJSONL[takeout.Subscription](p.subscriptionsJSONL())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
 	path := report.BuildPath(rows)
+	st := report.Aggregate(rows, subs)
 
 	if err := os.MkdirAll(p.outDir(), 0o755); err != nil {
 		return err
 	}
 	htmlPath := filepath.Join(p.outDir(), "watchpath.html")
-	html, err := report.RenderWatchPath(path, time.Now())
+	html, err := report.RenderWatchPath(path, st, time.Now())
 	if err != nil {
 		return err
 	}
@@ -47,19 +58,19 @@ func cmdWatchPath(args []string) error {
 	// Aggregates only — the page carries the titles, the terminal does not
 	// need them. They come straight from the stats the page runs on, so the
 	// two can never drift apart.
-	st := path.Stats
-	fmt.Printf("%d views on the timeline in %d sessions", st.Views, st.Sessions)
-	if st.Dropped > 0 {
-		fmt.Printf(", %d without a timestamp left off", st.Dropped)
+	ps := path.Stats
+	fmt.Printf("%d views on the timeline in %d sessions", ps.Views, ps.Sessions)
+	if ps.Dropped > 0 {
+		fmt.Printf(", %d without a timestamp left off", ps.Dropped)
 	}
 	fmt.Println()
 	fmt.Printf("%d views suspected of overlapping, %d inside a same-area chain\n",
-		st.OverlapViews, st.RabbitViews)
+		ps.OverlapViews, ps.RabbitViews)
 	if len(path.Days) > 0 {
-		d := path.Days[st.BusiestDay]
+		d := path.Days[ps.BusiestDay]
 		fmt.Printf("%d days carried a sitting (%s … %s), busiest %s with %d views\n",
 			len(path.Days), path.Days[0].Date, path.Days[len(path.Days)-1].Date,
-			d.Date, st.BusiestDayViews)
+			d.Date, ps.BusiestDayViews)
 	}
 	fmt.Printf("wrote %s (%.1f MB)\n", htmlPath, float64(len(html))/(1<<20))
 	return nil
