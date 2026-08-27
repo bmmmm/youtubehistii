@@ -16,6 +16,13 @@ func lab(area, sub string, views int) Label {
 		Channels: map[string]int{}, Tags: map[string]int{}}
 }
 
+// labCh is lab with a channel, for the prompts that quote channels.
+func labCh(area, sub string, views int, channel string) Label {
+	l := lab(area, sub, views)
+	l.Channels[channel] = views
+	return l
+}
+
 func TestCollectAggregatesPerTopic(t *testing.T) {
 	views := []View{
 		{VideoID: "v1", Area: "music", Sub: "jazz", Channel: "ch1", Title: "t1", Tags: []string{"jazz", "piano"}},
@@ -156,6 +163,40 @@ func TestFoldSmallFoldsIntoNearest(t *testing.T) {
 	}
 }
 
+func TestGroupPromptCarriesEveryCluster(t *testing.T) {
+	// Three subjects of one coarse group, each with several labels and its
+	// own channels — the shape that named a 31-subject music top level after
+	// its biggest part.
+	mk := func(a, b Label, va, vb []float32) Cluster {
+		return newCluster([]Label{a, b}, [][]float32{va, vb})
+	}
+	cs := []Cluster{
+		mk(labCh("music", "subject-a", 100, "rapchan"), labCh("music", "subject-c", 40, "dnbchan"), []float32{1, 0, 0}, []float32{1, 0.1, 0}),
+		mk(labCh("music", "techno", 50, "techchan"), labCh("music", "reggae", 20, "regchan"), []float32{0, 1, 0}, []float32{0.1, 1, 0}),
+		mk(labCh("music", "band-a", 30, "punkchan"), labCh("music", "punk", 10, "punk2chan"), []float32{0, 0, 1}, []float32{0, 0.1, 1}),
+	}
+
+	// An empty cluster in the group is skipped, not carried as a member.
+	p := GroupPrompt(append(cs, Cluster{}), []int{0, 1, 2, 3})
+	if got, want := topics(p), []string{"music/subject-a", "music/techno", "music/band-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("prompt members = %v, want the strongest label of each cluster %v", got, want)
+	}
+	if p.Views != 180 {
+		t.Errorf("prompt views = %d, want 180 (100+50+30)", p.Views)
+	}
+	// The channels a top-level prompt shows must come from the whole group;
+	// before, all five were the biggest subject's.
+	if got, want := p.TopChannels(5), []string{"rapchan", "techchan", "punkchan"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("TopChannels = %v, want one channel from each cluster %v", got, want)
+	}
+
+	// A group of one IS that cluster: cutting it down to its strongest label
+	// would take context away from the namer instead of adding any.
+	if solo := GroupPrompt(cs, []int{1}); !reflect.DeepEqual(topics(solo), topics(cs[1])) {
+		t.Errorf("solo group = %v, want the cluster itself %v", topics(solo), topics(cs[1]))
+	}
+}
+
 func TestRefineSplitsWhereCoherenceTears(t *testing.T) {
 	// Two far-apart pairs forced into one cluster by a huge threshold.
 	labels := []Label{lab("a", "x1", 10), lab("a", "x2", 10), lab("a", "y1", 10), lab("a", "y2", 10)}
@@ -175,6 +216,39 @@ func TestRefineSplitsWhereCoherenceTears(t *testing.T) {
 		if c.Name != "" {
 			t.Errorf("split pieces must come back unnamed, got %q", c.Name)
 		}
+	}
+}
+
+func TestRefineSkipsBlockedNames(t *testing.T) {
+	// The same over-wide cluster as above: it tears without the block, and
+	// stays whole once its name carries one — because the last split of it
+	// was undone by the same-name merge, so repeating it is a loop.
+	labels := []Label{lab("a", "x1", 10), lab("a", "x2", 10), lab("a", "y1", 10), lab("a", "y2", 10)}
+	vecs := [][]float32{{1, 0.02, 0}, {1, 0, 0.02}, {0.02, 1, 0}, {0, 1, 0.02}}
+	cs := ClusterLabels(labels, vecs, 0.99)
+	if len(cs) != 1 {
+		t.Fatalf("setup: %d clusters, want 1 overwide cluster", len(cs))
+	}
+	opts := RefineOpts{SplitAt: 0.1, MaxRadius: 0.2, MergeBelow: 0.05, MinVideos: 1}
+	if out, _ := Refine(cs, Control{}, opts); len(out) != 2 {
+		t.Fatalf("unblocked: %d clusters, want the radius trigger to split it", len(out))
+	}
+
+	opts.NoSplit = map[string]bool{cs[0].Name: true}
+	out, changes := Refine(cs, Control{}, opts)
+	if len(out) != 1 {
+		t.Errorf("blocked %q still split into %d: %v", cs[0].Name, len(out), names(out))
+	}
+	for _, c := range changes {
+		if c.Op == "split" {
+			t.Errorf("blocked name produced a split change: %v", c)
+		}
+	}
+
+	// The block stands down the automatic trigger only — a split a human
+	// asked for through the control file still happens.
+	if out, _ := Refine(cs, Control{Split: []string{cs[0].Name}}, opts); len(out) != 2 {
+		t.Errorf("control split ignored the wish: %d clusters, want 2", len(out))
 	}
 }
 

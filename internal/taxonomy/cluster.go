@@ -302,6 +302,37 @@ func Coarse(subjects []Cluster, threshold float64) [][]int {
 	return agglomerate(vecs, weights, threshold)
 }
 
+// GroupPrompt builds a stand-in cluster from the strongest label of every
+// cluster in the group, so the namer sees the whole group instead of its
+// biggest part.
+//
+// One label per cluster, not the group's strongest labels overall: a namer
+// reads only the first handful of members, and the biggest subject would
+// otherwise fill that prompt on its own — which is exactly how a top level
+// covering 31 subjects ended up named after one of them.
+func GroupPrompt(cs []Cluster, group []int) Cluster {
+	// A group of one IS that cluster: cutting it down to a single label
+	// would take context away from the namer instead of adding any.
+	if len(group) == 1 {
+		return cs[group[0]]
+	}
+	var labels []Label
+	var vecs [][]float32
+	for _, i := range group {
+		if len(cs[i].Members) == 0 {
+			continue // nothing to say — an empty cluster names nothing
+		}
+		// newCluster sorts members views-desc, so Members[0] is this
+		// cluster's strongest label.
+		labels = append(labels, cs[i].Members[0])
+		vecs = append(vecs, cs[i].vecs[0])
+	}
+	if len(labels) == 0 {
+		return Cluster{}
+	}
+	return newCluster(labels, vecs)
+}
+
 // MergeSameNames folds clusters that ended up with the same name into one.
 // Two clusters the namer cannot tell apart ARE the same subject — and unique
 // names are what guarantees a subject sits under exactly one top level.

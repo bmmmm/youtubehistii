@@ -14,6 +14,11 @@ type RefineOpts struct {
 	MaxRadius  float64 // subjects wider than this split automatically
 	MergeBelow float64 // subject pairs closer than this merge automatically
 	MinVideos  int     // small-tail bar, re-applied after splits
+	// NoSplit names subjects the automatic radius trigger must leave alone:
+	// a split whose pieces the namer gave one name, so that the same-name
+	// merge put the very same cluster back, had no effect — and repeating it
+	// every round is the loop, not a repair. The caller fills this in.
+	NoSplit map[string]bool
 }
 
 // Change is one refinement, worded for the terminal and the run log.
@@ -58,7 +63,10 @@ func Refine(subjects []Cluster, ctl Control, opts RefineOpts) ([]Cluster, []Chan
 	}
 	var next []Cluster
 	for _, c := range cs {
-		if !splitWanted[c.Name] && c.Radius <= opts.MaxRadius {
+		// A split a human asked for through the control file always happens;
+		// the block stands down the automatic radius trigger only.
+		split := splitWanted[c.Name] || (!opts.NoSplit[c.Name] && c.Radius > opts.MaxRadius)
+		if !split {
 			next = append(next, c)
 			continue
 		}

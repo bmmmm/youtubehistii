@@ -118,6 +118,10 @@ func cmdTaxonomy(args []string) error {
 		MaxRadius:  *maxRadius,
 		MergeBelow: *fine * 0.6,
 		MinVideos:  *minVideos,
+		// Filled in as the rounds go: a name whose split the same-name merge
+		// undid stays blocked for every later round, so the loop cannot
+		// re-enter through it.
+		NoSplit: map[string]bool{},
 	}
 
 	// Round 1: cluster, fold the tail, name everything, group into tops.
@@ -156,14 +160,22 @@ func cmdTaxonomy(args []string) error {
 		subjects, changes = taxonomy.Refine(subjects, ctl, opts)
 		nameSubjects(subjects, namer, false)
 		subjects = taxonomy.MergeSameNames(subjects)
+		blocked := blockUndoneSplits(subjects, changes, opts.NoSplit)
 		assignParents(subjects, *coarse, namer)
 
 		m := taxonomy.Measure(subjects, *tailN)
 		timer.mark(fmt.Sprintf("round-%d", round))
-		log.event("round", map[string]any{"n": round, "metrics": m, "changes": changes})
+		detail := map[string]any{"n": round, "metrics": m, "changes": changes}
+		if len(blocked) > 0 {
+			detail["split_blocked"] = blocked
+		}
+		log.event("round", detail)
 		fmt.Printf("round %d    %s\n", round, metricsLine(m))
 		for _, c := range biggestChanges(changes, 8) {
 			fmt.Printf("  %s\n", c)
+		}
+		for _, name := range blocked {
+			fmt.Printf("  split blocked: %s — the same-name merge put it straight back\n", name)
 		}
 		if m == last {
 			fmt.Println("metrics settled — done")
@@ -465,19 +477,46 @@ func nameSubjects(cs []taxonomy.Cluster, namer func(taxonomy.Cluster, string) st
 // dedupe.
 func assignParents(cs []taxonomy.Cluster, coarse float64, namer func(taxonomy.Cluster, string) string) {
 	for _, group := range taxonomy.Coarse(cs, coarse) {
-		// The group's strongest subject carries the naming prompt: its
-		// members already hold the labels and channels that describe it.
-		strongest := group[0]
-		for _, i := range group {
-			if cs[i].Views > cs[strongest].Views {
-				strongest = i
-			}
+		// The WHOLE group carries the naming prompt, one label per subject:
+		// naming it after its strongest subject alone called a top level of
+		// 31 music subjects "subject-a" and one of 29 sport subjects
+		// "cycling". TopChannels then sums across the group too.
+		prompt := taxonomy.GroupPrompt(cs, group)
+		if len(prompt.Members) == 0 {
+			continue
 		}
-		top := namer(cs[strongest], "top")
+		top := namer(prompt, "top")
 		for _, i := range group {
 			cs[i].Parent = top
 		}
 	}
+}
+
+// blockUndoneSplits marks the splits this round undid itself. A split whose
+// pieces the namer gave one name is glued straight back by MergeSameNames,
+// and because MergeClusters concatenates the members, the restored cluster
+// carries the split cluster's name and its views to the number — that exact
+// identity is the check. Such a split changed nothing, so repeating it every
+// round is by definition a loop; the name never splits automatically again.
+// Returns the newly blocked names, for the run log and the terminal.
+func blockUndoneSplits(subjects []taxonomy.Cluster, changes []taxonomy.Change, noSplit map[string]bool) []string {
+	var blocked []string
+	for _, ch := range changes {
+		if ch.Op != "split" || ch.From == "" || noSplit[ch.From] {
+			continue
+		}
+		standing := 0
+		for _, c := range subjects {
+			if c.Name == ch.From && c.Views == ch.Views {
+				standing++
+			}
+		}
+		if standing == 1 {
+			noSplit[ch.From] = true
+			blocked = append(blocked, ch.From)
+		}
+	}
+	return blocked
 }
 
 // biggestChanges picks the highest-view changes for the terminal.
