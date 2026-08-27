@@ -22,6 +22,55 @@ func Cosine(a, b []float32) float64 {
 	return dot / (math.Sqrt(na) * math.Sqrt(nb))
 }
 
+// Center subtracts the mean vector from every vector and renormalizes.
+//
+// Embedding models are anisotropic: every vector carries a large component
+// that says nothing about its text, so all pairwise cosines crowd into a
+// narrow band and a threshold has no plateau to sit in. On this corpus the
+// entire structure collapsed across 0.15 threshold units — 39 top levels at
+// 0.35, four at 0.40, one at 0.45 — and the labels that could not be told
+// apart ended up folded into a single bucket. Removing the shared direction
+// spreads the distances back out.
+//
+// The embedding cache is untouched: this runs on vectors after they are
+// read, never on what is stored, so switching it on costs no model calls.
+func Center(vecs [][]float32) [][]float32 {
+	if len(vecs) == 0 {
+		return nil
+	}
+	d := len(vecs[0])
+	mean := make([]float64, d)
+	for _, v := range vecs {
+		if len(v) != d {
+			return vecs // ragged input: leave it alone rather than corrupt it
+		}
+		for j, x := range v {
+			mean[j] += float64(x)
+		}
+	}
+	for j := range mean {
+		mean[j] /= float64(len(vecs))
+	}
+	out := make([][]float32, len(vecs))
+	for i, v := range vecs {
+		centered := make([]float64, d)
+		var norm float64
+		for j, x := range v {
+			centered[j] = float64(x) - mean[j]
+			norm += centered[j] * centered[j]
+		}
+		norm = math.Sqrt(norm)
+		o := make([]float32, d)
+		if norm > 0 {
+			for j, x := range centered {
+				o[j] = float32(x / norm)
+			}
+		}
+		out[i] = o
+	}
+	return out
+}
+
 // Centroid returns the weighted mean of the vectors, L2-normalized. Weights
 // below 1 count as 1 so an unwatched label still pulls its own tiny weight.
 func Centroid(vecs [][]float32, weights []int) []float32 {

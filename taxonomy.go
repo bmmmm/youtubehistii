@@ -32,12 +32,16 @@ func cmdTaxonomy(args []string) error {
 	fs, dataDir := newFlagSet("taxonomy")
 	rulesPath := fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)")
 	embedModel := fs.String("embed-model", "bge-m3-mlx-fp16", "embedding model on the oMLX server (multilingual, so chess and schach meet)")
-	fine := fs.Float64("fine", 0.35, "cosine-distance threshold for subjects (smaller = more, tighter clusters)")
-	coarse := fs.Float64("coarse", 0.60, "cosine-distance threshold for the top level")
+	// Thresholds live on the CENTERED distance scale (see -center), where the
+	// structure degrades gently instead of collapsing: calibrated on a 35k
+	// corpus to 191 subjects under 17 top levels.
+	fine := fs.Float64("fine", 0.70, "cosine-distance threshold for subjects (smaller = more, tighter clusters)")
+	coarse := fs.Float64("coarse", 0.85, "cosine-distance threshold for the top level")
 	minVideos := fs.Int("min-videos", 3, "fold subjects with fewer unique videos into their nearest neighbor")
 	maxRadius := fs.Float64("max-radius", 0.50, "split subjects wider than this in refinement rounds")
 	rounds := fs.Int("rounds", 5, "refinement rounds at most; the control file can stop earlier")
 	tailN := fs.Int("tail-n", 1, "the tail metric counts subjects with at most this many videos")
+	center := fs.Bool("center", true, "subtract the mean vector before clustering — spreads out embeddings that crowd into one band")
 	noLLM := fs.Bool("no-llm", false, "name clusters from their strongest member instead of asking the chat model")
 	probe := fs.Bool("probe", false, "measure server latency (one embedding batch, one chat request) and estimate the run; changes nothing")
 	fs.Parse(args)
@@ -101,7 +105,11 @@ func cmdTaxonomy(args []string) error {
 		return err
 	}
 	log.event("embed", map[string]any{"model": *embedModel, "fresh": fresh, "cached": len(labels) - fresh})
-	fmt.Printf("embedded %d labels (%d fresh, %d from cache)\n", len(labels), fresh, len(labels)-fresh)
+	if *center {
+		vecs = taxonomy.Center(vecs)
+	}
+	fmt.Printf("embedded %d labels (%d fresh, %d from cache)%s\n", len(labels), fresh, len(labels)-fresh,
+		map[bool]string{true: ", mean-centered"}[*center])
 	timer.mark("embed")
 
 	namer := newNamer(client, *noLLM, log, p.nameCacheDir())
