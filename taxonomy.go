@@ -26,6 +26,14 @@ import (
 const (
 	taxonomyPath = "config/taxonomy.yaml"
 	controlPath  = "config/taxonomy-control.yaml"
+
+	// defaultRounds bounds the refinement loop. 10, not 5: with one automatic
+	// split per name the churn decays instead of cycling, and the real corpus
+	// (2679 labels) settled at round 8 — a lower limit hides convergence
+	// behind "ran out of rounds". Late rounds are cheap: they split almost
+	// nothing and their names come from the cache. The probe's naming estimate
+	// reads the same constant, so the two cannot drift apart.
+	defaultRounds = 10
 )
 
 func cmdTaxonomy(args []string) error {
@@ -39,7 +47,7 @@ func cmdTaxonomy(args []string) error {
 	coarse := fs.Float64("coarse", 0.85, "cosine-distance threshold for the top level")
 	minVideos := fs.Int("min-videos", 3, "fold subjects with fewer unique videos into their nearest neighbor")
 	maxRadius := fs.Float64("max-radius", 0.50, "split subjects wider than this in refinement rounds")
-	rounds := fs.Int("rounds", 5, "refinement rounds at most; the control file can stop earlier")
+	rounds := fs.Int("rounds", defaultRounds, "refinement rounds at most; the control file can stop earlier")
 	tailN := fs.Int("tail-n", 1, "the tail metric counts subjects with at most this many videos")
 	center := fs.Bool("center", true, "subtract the mean vector before clustering — spreads out embeddings that crowd into one band")
 	noLLM := fs.Bool("no-llm", false, "name clusters from their strongest member instead of asking the chat model")
@@ -160,7 +168,7 @@ func cmdTaxonomy(args []string) error {
 		subjects, changes = taxonomy.Refine(subjects, ctl, opts)
 		nameSubjects(subjects, namer, false)
 		subjects = taxonomy.MergeSameNames(subjects)
-		blocked := blockUndoneSplits(subjects, changes, opts.NoSplit)
+		blocked := blockSecondSplit(changes, opts.NoSplit)
 		assignParents(subjects, *coarse, namer)
 
 		m := taxonomy.Measure(subjects, *tailN)
@@ -175,7 +183,7 @@ func cmdTaxonomy(args []string) error {
 			fmt.Printf("  %s\n", c)
 		}
 		for _, name := range blocked {
-			fmt.Printf("  split blocked: %s — the same-name merge put it straight back\n", name)
+			fmt.Printf("  split blocked: %s — one automatic attempt per name, the namer keeps putting it back together\n", name)
 		}
 		if m == last {
 			fmt.Println("metrics settled — done")
@@ -279,11 +287,11 @@ func probeRun(client *omlx.Client, embedModel string, p paths) error {
 	}
 	embedCost := time.Duration(nLabels/32+1) * embedBatch
 	nameCost := 300 * chatReq // cluster count is unknown before the run; 300 is generous
-	fmt.Printf("estimate for %d labels: embeddings ≈ %s, naming (at ~300 clusters, 5 rounds worst case) ≈ %s\n",
-		nLabels, embedCost.Round(time.Second), (5 * nameCost).Round(time.Second))
+	fmt.Printf("estimate for %d labels: embeddings ≈ %s, naming (at ~300 clusters, %d rounds worst case) ≈ %s\n",
+		nLabels, embedCost.Round(time.Second), defaultRounds, (defaultRounds * nameCost).Round(time.Second))
 	fmt.Printf("server work fits the hour: %v — clustering runs locally and is NOT in that number;\n"+
 		"  \"taxonomy -no-llm -rounds 1\" measures it and prints the timing line\n",
-		embedCost+5*nameCost < time.Hour)
+		embedCost+defaultRounds*nameCost < time.Hour)
 	return nil
 }
 
@@ -492,29 +500,29 @@ func assignParents(cs []taxonomy.Cluster, coarse float64, namer func(taxonomy.Cl
 	}
 }
 
-// blockUndoneSplits marks the splits this round undid itself. A split whose
-// pieces the namer gave one name is glued straight back by MergeSameNames,
-// and because MergeClusters concatenates the members, the restored cluster
-// carries the split cluster's name and its views to the number — that exact
-// identity is the check. Such a split changed nothing, so repeating it every
-// round is by definition a loop; the name never splits automatically again.
+// blockSecondSplit gives every name one automatic split per run. The pieces
+// come back unnamed, the namer hands several of them the same name again, and
+// MergeSameNames glues those into a cluster that carries the name and is still
+// wider than -max-radius — so the next round splits it again.
+//
+// The split is not undone exactly, only undone in effect: measured on the real
+// corpus, "split music" fired in all five rounds at 346, 190, 229 and 236
+// views, never twice the same size. An identity check on the restored views
+// therefore misses it, which is why the rule is the blunt one — a name whose
+// pieces the namer cannot tell apart is tried once and then left alone. Since
+// names are finite and each gets at most one automatic split, the loop
+// terminates by construction.
+//
+// A split the control file asks for is unaffected: Refine checks that first.
 // Returns the newly blocked names, for the run log and the terminal.
-func blockUndoneSplits(subjects []taxonomy.Cluster, changes []taxonomy.Change, noSplit map[string]bool) []string {
+func blockSecondSplit(changes []taxonomy.Change, noSplit map[string]bool) []string {
 	var blocked []string
 	for _, ch := range changes {
 		if ch.Op != "split" || ch.From == "" || noSplit[ch.From] {
 			continue
 		}
-		standing := 0
-		for _, c := range subjects {
-			if c.Name == ch.From && c.Views == ch.Views {
-				standing++
-			}
-		}
-		if standing == 1 {
-			noSplit[ch.From] = true
-			blocked = append(blocked, ch.From)
-		}
+		noSplit[ch.From] = true
+		blocked = append(blocked, ch.From)
 	}
 	return blocked
 }

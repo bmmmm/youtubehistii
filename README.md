@@ -17,8 +17,8 @@ server on `127.0.0.1`) as fallback. Every verdict records *why* it was made.
 youtubehistii import   data/watch-history.json    → data/history.jsonl
 youtubehistii enrich                              → data/cache/meta/<videoID>.json
 youtubehistii classify                            → data/classified.jsonl
-youtubehistii report                              → data/out/report.html + report.csv
-youtubehistii watchpath                           → data/out/watchpath.html
+youtubehistii report                              → data/out/report.csv + terminal summary
+youtubehistii watchpath                           → data/out/watchpath.html (incl. #/report)
 
 youtubehistii run      all of enrich + classify + report in one go, overlapped
 ```

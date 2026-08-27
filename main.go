@@ -60,9 +60,10 @@ Usage:
                                   config/taxonomy-control.yaml, watch it in
                                   data/out/taxonomy-run.jsonl. Flags: -embed-model
                                   bge-m3-mlx-fp16, -fine 0.70, -coarse 0.85, -min-videos 3,
-                                  -rounds 5, -center=false (skip mean-centering), -no-llm,
+                                  -rounds 10, -center=false (skip mean-centering), -no-llm,
                                   -probe (measure server latency, change nothing)
-  youtubehistii report            render data/out/report.html + report.csv + terminal summary
+  youtubehistii report            render data/out/report.csv + terminal summary; the same
+                                  numbers are a view of the watchpath page, at #/report
                                   (-taxonomy: project topics through config/taxonomy.yaml)
   youtubehistii watchpath         render data/out/watchpath.html: the same views along the
                                   time axis — sittings split by a 30 min gap, newest first,
