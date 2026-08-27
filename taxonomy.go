@@ -46,6 +46,7 @@ func cmdTaxonomy(args []string) error {
 	fine := fs.Float64("fine", 0.70, "cosine-distance threshold for subjects (smaller = more, tighter clusters)")
 	coarse := fs.Float64("coarse", 0.85, "cosine-distance threshold for the top level")
 	minVideos := fs.Int("min-videos", 3, "fold subjects with fewer unique videos into their nearest neighbor")
+	minTopVideos := fs.Int("min-top-videos", 25, "fold top levels with fewer unique videos into their nearest neighbor")
 	maxRadius := fs.Float64("max-radius", 0.50, "split subjects wider than this in refinement rounds")
 	rounds := fs.Int("rounds", defaultRounds, "refinement rounds at most; the control file can stop earlier")
 	tailN := fs.Int("tail-n", 1, "the tail metric counts subjects with at most this many videos")
@@ -145,7 +146,7 @@ func cmdTaxonomy(args []string) error {
 	nameSubjects(subjects, namer, true)
 	timer.mark("name")
 	subjects = taxonomy.MergeSameNames(subjects)
-	assignParents(subjects, *coarse, namer)
+	assignParents(subjects, *coarse, *minTopVideos, ctl.KeepSet(), namer)
 	timer.mark("coarse")
 
 	last := taxonomy.Measure(subjects, *tailN)
@@ -169,7 +170,7 @@ func cmdTaxonomy(args []string) error {
 		nameSubjects(subjects, namer, false)
 		subjects = taxonomy.MergeSameNames(subjects)
 		blocked := blockSecondSplit(changes, opts.NoSplit)
-		assignParents(subjects, *coarse, namer)
+		assignParents(subjects, *coarse, *minTopVideos, ctl.KeepSet(), namer)
 
 		m := taxonomy.Measure(subjects, *tailN)
 		timer.mark(fmt.Sprintf("round-%d", round))
@@ -482,9 +483,11 @@ func nameSubjects(cs []taxonomy.Cluster, namer func(taxonomy.Cluster, string) st
 
 // assignParents groups subjects into top levels and names each group. Two
 // groups landing on the same name simply ARE one top level — nothing to
-// dedupe.
-func assignParents(cs []taxonomy.Cluster, coarse float64, namer func(taxonomy.Cluster, string) string) {
-	for _, group := range taxonomy.Coarse(cs, coarse) {
+// dedupe. Groups under the minTopVideos bar are folded into their nearest
+// neighbour first, so a far-out subject does not become a section of one.
+func assignParents(cs []taxonomy.Cluster, coarse float64, minTopVideos int, keep map[string]bool, namer func(taxonomy.Cluster, string) string) {
+	groups := taxonomy.FoldSmallGroups(cs, taxonomy.Coarse(cs, coarse), minTopVideos, keep)
+	for _, group := range groups {
 		// The WHOLE group carries the naming prompt, one label per subject:
 		// naming it after its strongest subject alone called a top level of
 		// 31 music subjects "subject-a" and one of 29 sport subjects

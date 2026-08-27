@@ -163,6 +163,62 @@ func TestFoldSmallFoldsIntoNearest(t *testing.T) {
 	}
 }
 
+// The shape that made "subject-b" a top level of one subject and three views:
+// a subject sitting far enough from everything else forms a coarse group of
+// its own, and nothing used to stop that group from becoming a section.
+func TestFoldSmallGroupsAbsorbsAStraySection(t *testing.T) {
+	// assignParents runs after naming, so the subjects carry their names —
+	// that is what the keep set matches on.
+	mk := func(name string, l Label, v []float32) Cluster {
+		c := newCluster([]Label{l}, [][]float32{v})
+		c.Name = name
+		return c
+	}
+	cs := []Cluster{
+		mk("cycling", lab("sports", "cycling", 200), []float32{1, 0, 0}),
+		mk("subject-d", lab("sports", "subject-d", 120), []float32{0.98, 0.2, 0}),
+		mk("subject-a", lab("music", "subject-a", 300), []float32{0, 1, 0}),
+		mk("subject-b", lab("sports", "subject-b", 3), []float32{0.7, 0.05, 0.7}),
+	}
+	groups := [][]int{{0, 1}, {2}, {3}}
+
+	folded := FoldSmallGroups(cs, groups, 25, nil)
+	if len(folded) != 2 {
+		t.Fatalf("got %d groups, want 2 — the stray should not stay a section: %v", len(folded), folded)
+	}
+	// It lands with sport, not with music: that is the whole point of folding
+	// by centroid rather than dropping it.
+	var host []int
+	for _, g := range folded {
+		for _, i := range g {
+			if cs[i].Name == "subject-b" {
+				host = g
+			}
+		}
+	}
+	names := map[string]bool{}
+	for _, i := range host {
+		names[cs[i].Name] = true
+	}
+	if !names["cycling"] || !names["subject-d"] || names["subject-a"] {
+		t.Errorf("subject-b landed in the wrong section: %v", names)
+	}
+	// The subjects themselves are untouched — only the grouping moved.
+	if len(cs[3].Members) != 1 || cs[3].Name != "subject-b" {
+		t.Errorf("folding rewrote the subject: %+v", cs[3])
+	}
+
+	// A keep name protects its group.
+	kept := FoldSmallGroups(cs, groups, 25, map[string]bool{"subject-b": true})
+	if len(kept) != 3 {
+		t.Errorf("keep ignored: %d groups, want 3", len(kept))
+	}
+	// And when nothing clears the bar, everything stays.
+	if all := FoldSmallGroups(cs, groups, 100000, nil); len(all) != 3 {
+		t.Errorf("a tiny corpus is not a tail: %d groups, want 3", len(all))
+	}
+}
+
 func TestGroupPromptCarriesEveryCluster(t *testing.T) {
 	// Three subjects of one coarse group, each with several labels and its
 	// own channels — the shape that named a 31-subject music top level after

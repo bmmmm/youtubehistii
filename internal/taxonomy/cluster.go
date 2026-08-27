@@ -302,6 +302,73 @@ func Coarse(subjects []Cluster, threshold float64) [][]int {
 	return agglomerate(vecs, weights, threshold)
 }
 
+// FoldSmallGroups moves the subjects of every coarse group under the bar into
+// the nearest group that clears it. Subjects have had this bar since the
+// beginning (FoldSmall, -min-videos); top levels had none, so a subject whose
+// centroid sat far enough from everything else became its own top level no
+// matter how small it was — "subject-b" was a top of one subject and three
+// views while its own label read sports/subject-b.
+//
+// The subjects themselves are untouched: only the grouping changes, so a
+// folded stray keeps its own name and simply sits under a real section. Keep
+// names protect their whole group, and when nothing clears the bar everything
+// stays — a tiny corpus is not a tail.
+func FoldSmallGroups(subjects []Cluster, groups [][]int, minVideos int, keep map[string]bool) [][]int {
+	center := func(g []int) []float32 {
+		vecs := make([][]float32, 0, len(g))
+		weights := make([]int, 0, len(g))
+		for _, i := range g {
+			vecs = append(vecs, subjects[i].Centroid)
+			weights = append(weights, subjects[i].Views)
+		}
+		return Centroid(vecs, weights)
+	}
+	clears := func(g []int) bool {
+		videos := 0
+		for _, i := range g {
+			if keep[subjects[i].Name] {
+				return true
+			}
+			videos += subjects[i].Videos
+		}
+		return videos >= minVideos
+	}
+
+	// The kept groups are copied: this appends to them and sorts them, and
+	// doing that to the caller's slices would edit the grouping it passed in.
+	var big, small [][]int
+	for _, g := range groups {
+		if clears(g) {
+			big = append(big, append([]int(nil), g...))
+		} else {
+			small = append(small, g)
+		}
+	}
+	if len(big) == 0 {
+		return groups
+	}
+
+	centers := make([][]float32, len(big))
+	for i, g := range big {
+		centers[i] = center(g)
+	}
+	for _, s := range small {
+		sc := center(s)
+		bi, best := 0, -2.0
+		for i := range big {
+			if sim := Cosine(sc, centers[i]); sim > best {
+				bi, best = i, sim
+			}
+		}
+		big[bi] = append(big[bi], s...)
+		centers[bi] = center(big[bi])
+	}
+	for _, g := range big {
+		sort.Ints(g)
+	}
+	return big
+}
+
 // GroupPrompt builds a stand-in cluster from the strongest label of every
 // cluster in the group, so the namer sees the whole group instead of its
 // biggest part.
