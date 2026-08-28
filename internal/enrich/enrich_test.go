@@ -79,8 +79,8 @@ func TestFetchChunkSplitsOutcomes(t *testing.T) {
 	if len(res.Fetched) > 0 && res.Fetched[0].Categories[0] != "Gaming" {
 		t.Errorf("categories lost: %+v", res.Fetched[0])
 	}
-	if strings.Join(res.Unavailable, ",") != "gone000002" {
-		t.Errorf("Unavailable = %v", res.Unavailable)
+	if len(res.Unavailable) != 1 || res.Unavailable[0].ID != "gone000002" {
+		t.Errorf("Unavailable = %+v", res.Unavailable)
 	}
 	if strings.Join(res.Failed, ",") != "flaky00003" {
 		t.Errorf("Failed = %v", res.Failed)
@@ -259,8 +259,14 @@ func TestClassifyErrors(t *testing.T) {
 ERROR: [youtube] priv0000002: Private video. Sign in if you've been granted access
 ERROR: [youtube] flaky000003: Unable to download webpage: timed out`
 	gone, failed := ClassifyErrors(stderr, []string{"gone0000001", "priv0000002", "flaky000003", "silent00004"})
-	if len(gone) != 2 || gone[0] != "gone0000001" || gone[1] != "priv0000002" {
-		t.Errorf("gone = %v", gone)
+	if len(gone) != 2 || gone[0].ID != "gone0000001" || gone[1].ID != "priv0000002" {
+		t.Errorf("gone = %+v", gone)
+	}
+	// The reason is recorded, not just the fact. "removed" wins over the
+	// "unavailable" that sits in the same sentence, because it is the more
+	// specific statement about the same video.
+	if len(gone) == 2 && (gone[0].Reason != "removed" || gone[1].Reason != "private") {
+		t.Errorf("reasons = %q/%q, want removed/private", gone[0].Reason, gone[1].Reason)
 	}
 	// timeout and an ID with no stderr line at all are both transient
 	if len(failed) != 2 || failed[0] != "flaky000003" || failed[1] != "silent00004" {
@@ -272,9 +278,13 @@ func TestClassifyErrorsAgeRestrictedIsGoneNotBotCheck(t *testing.T) {
 	stderr := `ERROR: [youtube] age00000001: Sign in to confirm your age. This video may be inappropriate for some users
 ERROR: [youtube] bot00000002: Sign in to confirm you're not a bot`
 	gone, failed := ClassifyErrors(stderr, []string{"age00000001", "bot00000002"})
-	// Age verification is permanent without --cookies -> tombstone it.
-	if len(gone) != 1 || gone[0] != "age00000001" {
-		t.Errorf("gone = %v, want [age00000001]", gone)
+	// Age verification is permanent without --cookies -> tombstone it, but
+	// record WHY: a later run with working cookies can fetch exactly these.
+	if len(gone) != 1 || gone[0].ID != "age00000001" {
+		t.Errorf("gone = %+v, want [age00000001]", gone)
+	}
+	if len(gone) == 1 && gone[0].Reason != "age" {
+		t.Errorf("reason = %q, want age", gone[0].Reason)
 	}
 	// Bot-check signals IP-level rate limiting -> transient, retry later.
 	if len(failed) != 1 || failed[0] != "bot00000002" {
@@ -288,11 +298,60 @@ ERROR: [youtube] bot00000002: Sign in to confirm you're not a bot`
 func TestClassifyErrorsMembersOnlyIsGone(t *testing.T) {
 	stderr := `ERROR: [youtube] mem00000001: This video is available to this channel's members on level: LTT Members Plus (or any higher level). Join this channel to get access to members-only content and other exclusive perks.`
 	gone, failed := ClassifyErrors(stderr, []string{"mem00000001"})
-	if len(gone) != 1 || gone[0] != "mem00000001" {
-		t.Errorf("gone = %v, want the members-only video tombstoned", gone)
+	if len(gone) != 1 || gone[0].ID != "mem00000001" {
+		t.Errorf("gone = %+v, want the members-only video tombstoned", gone)
+	}
+	if len(gone) == 1 && gone[0].Reason != "members" {
+		t.Errorf("reason = %q, want members", gone[0].Reason)
 	}
 	if len(failed) != 0 {
 		t.Errorf("failed = %v, want none", failed)
+	}
+}
+
+// TestClassifyErrorsSpecificReasonWinsOverGeneric pins the ordering in
+// goneMarkers. Both messages below contain "unavailable", which on its own
+// would file them as permanently dead. They are not: with the credential they
+// still fetch, and the reason is the only thing that says so — a run that
+// files them as "unavailable" can never find them again.
+func TestClassifyErrorsSpecificReasonWinsOverGeneric(t *testing.T) {
+	stderr := `ERROR: [youtube] age00000001: Video unavailable. Sign in to confirm your age
+ERROR: [youtube] mem00000002: Video unavailable. Join this channel to get access to members-only content`
+	gone, _ := ClassifyErrors(stderr, []string{"age00000001", "mem00000002"})
+	if len(gone) != 2 {
+		t.Fatalf("gone = %+v, want both tombstoned", gone)
+	}
+	if gone[0].Reason != "age" {
+		t.Errorf("reason = %q, want age — the generic 'unavailable' must not win", gone[0].Reason)
+	}
+	if gone[1].Reason != "members" {
+		t.Errorf("reason = %q, want members", gone[1].Reason)
+	}
+}
+
+// TestTombstoneWithoutReasonStaysReadable: every tombstone written before
+// GoneReason existed has no reason at all. Those must keep loading — and an
+// empty reason is itself the signal that the entry predates the field, which
+// makes it a retry candidate rather than a decided case.
+func TestTombstoneWithoutReasonStaysReadable(t *testing.T) {
+	c := Cache{Dir: t.TempDir()}
+	if err := os.WriteFile(filepath.Join(c.Dir, "old0000001.json"),
+		[]byte(`{"id":"old0000001","unavailable":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	metas, err := c.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, ok := metas["old0000001"]
+	if !ok {
+		t.Fatal("pre-GoneReason tombstone did not load")
+	}
+	if !m.Unavailable {
+		t.Error("tombstone lost its Unavailable flag")
+	}
+	if m.GoneReason != "" {
+		t.Errorf("GoneReason = %q, want empty for an old entry", m.GoneReason)
 	}
 }
 

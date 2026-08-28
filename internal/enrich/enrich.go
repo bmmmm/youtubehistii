@@ -29,6 +29,13 @@ type Meta struct {
 	Tags        []string `json:"tags,omitempty"`
 	UploadDate  string   `json:"upload_date,omitempty"`
 	Unavailable bool     `json:"unavailable,omitempty"` // tombstone: video gone, don't retry
+	// GoneReason says WHY the tombstone was written — "age", "members",
+	// "private", "removed", "terminated", "unavailable". It separates the
+	// permanently dead from the merely locked: "age" and "members" are gone
+	// only for a caller without the credential, so a later run with working
+	// cookies can retry exactly those. An empty reason on a tombstone means
+	// it predates this field, which makes it a retry candidate too.
+	GoneReason string `json:"gone_reason,omitempty"`
 }
 
 // rawMeta tolerates yt-dlp's field types (duration may be a float).
@@ -243,7 +250,7 @@ func (c Cache) ReadAll() (map[string]Meta, error) {
 // ChunkResult reports what one yt-dlp invocation produced.
 type ChunkResult struct {
 	Fetched     []Meta
-	Unavailable []string // gone for good -> tombstone
+	Unavailable []Gone   // gone for good -> tombstone, each with its reason
 	Failed      []string // transient (network, rate limit) -> retry next run
 
 	// RateLimited means YouTube pushed back on the request rate rather than
@@ -270,9 +277,25 @@ var errLineRe = regexp.MustCompile(`ERROR: \[[^\]]+\] ([A-Za-z0-9_-]{6,20}): (.*
 // content"). Like age restriction it is permanent for anyone without the
 // credential, and it used to be misfiled as transient — so every run retried
 // the same paywalled videos forever, at full request cost.
-var goneMarkers = []string{
-	"unavailable", "private", "removed", "terminated", "not available",
-	"confirm your age", "members",
+// Each marker carries the reason it is filed under, so a tombstone records
+// WHY it is one. The reason is the normalized label, never yt-dlp's raw line:
+// that line quotes the video title, and the meta cache is already a profile
+// of a person.
+//
+// Order matters and the specific markers come first. "Sign in to confirm your
+// age" and the members-only wall are the two reasons that are permanent only
+// for a caller WITHOUT the credential — a later run with working cookies can
+// still fetch them, and that is the whole point of recording the reason. A
+// message that names both ("unavailable ... confirm your age") must therefore
+// come out as "age", not as the generic "unavailable" that would hide it.
+var goneMarkers = []struct{ marker, reason string }{
+	{"confirm your age", "age"},
+	{"members", "members"},
+	{"private", "private"},
+	{"removed", "removed"},
+	{"terminated", "terminated"},
+	{"unavailable", "unavailable"},
+	{"not available", "unavailable"},
 }
 
 // rateLimitMarkers mean YouTube is throttling this IP or account — nothing is
@@ -315,9 +338,18 @@ func cookiesUnusable(stderr string) bool {
 	return false
 }
 
+// Gone is a video yt-dlp will not return, together with the normalized reason
+// it is filed under. The reason decides whether a later run can do anything
+// about it: "age" and "members" are permanent only without the credential,
+// everything else is permanent full stop.
+type Gone struct {
+	ID     string
+	Reason string
+}
+
 // ClassifyErrors splits the IDs missing from stdout into gone vs. transient,
 // based on yt-dlp's stderr.
-func ClassifyErrors(stderr string, missing []string) (gone, failed []string) {
+func ClassifyErrors(stderr string, missing []string) (gone []Gone, failed []string) {
 	reasons := map[string]string{}
 	for _, m := range errLineRe.FindAllStringSubmatch(stderr, -1) {
 		reasons[m[1]] = strings.ToLower(m[2])
@@ -328,15 +360,15 @@ func ClassifyErrors(stderr string, missing []string) (gone, failed []string) {
 			failed = append(failed, id)
 			continue
 		}
-		isGone := false
-		for _, marker := range goneMarkers {
-			if strings.Contains(msg, marker) {
-				isGone = true
+		reason := ""
+		for _, g := range goneMarkers {
+			if strings.Contains(msg, g.marker) {
+				reason = g.reason
 				break
 			}
 		}
-		if isGone {
-			gone = append(gone, id)
+		if reason != "" {
+			gone = append(gone, Gone{ID: id, Reason: reason})
 		} else {
 			failed = append(failed, id)
 		}

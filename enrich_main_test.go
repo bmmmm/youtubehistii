@@ -123,7 +123,7 @@ func TestFetchOneDoesNotRetryTransientFailures(t *testing.T) {
 		rec.record(ids, o)
 		return enrich.ChunkResult{
 			Fetched:     []enrich.Meta{{ID: "ok0000001"}},
-			Unavailable: []string{"gone000002"},
+			Unavailable: []enrich.Gone{{ID: "gone000002", Reason: "removed"}},
 			Failed:      []string{"flaky00003"},
 		}, nil
 	}
@@ -239,7 +239,11 @@ func TestEnrichAllRecoversBackoffOnTombstoneOnlyChunk(t *testing.T) {
 	opts := enrichOpts{
 		chunk: 1, workers: 1, pauseUnit: time.Millisecond, state: st,
 		fetch: func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
-			return enrich.ChunkResult{Unavailable: ids}, nil
+			gone := make([]enrich.Gone, len(ids))
+			for i, id := range ids {
+				gone[i] = enrich.Gone{ID: id, Reason: "removed"}
+			}
+			return enrich.ChunkResult{Unavailable: gone}, nil
 		},
 	}
 	if err := runEnrichAll(t, paths{dataDir: t.TempDir()}, viewsN(3), opts); err != nil {

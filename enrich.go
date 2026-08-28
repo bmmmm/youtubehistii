@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -232,6 +233,11 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 	// chunks off a channel; the first error stops the intake.
 	type totals struct {
 		fetched, tombstoned, failed, done int
+		// goneBy counts tombstones per reason. Without it the reason exists
+		// only inside the cache, and the run that produced it says nothing
+		// about what it found — which is the whole question when deciding
+		// whether a retry with credentials is worth it.
+		goneBy map[string]int
 		err                               error
 	}
 	var (
@@ -296,13 +302,19 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 						t.err = werr
 					}
 				}
-				for _, id := range res.Unavailable {
-					if werr := cache.Write(enrich.Meta{ID: id, Unavailable: true}); werr != nil && t.err == nil {
+				for _, g := range res.Unavailable {
+					if werr := cache.Write(enrich.Meta{ID: g.ID, Unavailable: true, GoneReason: g.Reason}); werr != nil && t.err == nil {
 						t.err = werr
 					}
 				}
 				t.fetched += len(res.Fetched)
 				t.tombstoned += len(res.Unavailable)
+				for _, g := range res.Unavailable {
+					if t.goneBy == nil {
+						t.goneBy = map[string]int{}
+					}
+					t.goneBy[g.Reason]++
+				}
 				t.failed += len(res.Failed)
 				t.done += len(all)
 				elapsed := time.Since(start)
@@ -363,6 +375,30 @@ feed:
 	}
 	fmt.Printf("done: %d fetched, %d gone for good (tombstoned, kept in the report), %d failed\n",
 		t.fetched, t.tombstoned, t.failed)
+	if len(t.goneBy) > 0 {
+		reasons := make([]string, 0, len(t.goneBy))
+		for r := range t.goneBy {
+			reasons = append(reasons, r)
+		}
+		sort.Slice(reasons, func(i, j int) bool {
+			if t.goneBy[reasons[i]] != t.goneBy[reasons[j]] {
+				return t.goneBy[reasons[i]] > t.goneBy[reasons[j]]
+			}
+			return reasons[i] < reasons[j]
+		})
+		parts := make([]string, 0, len(reasons))
+		locked := 0
+		for _, r := range reasons {
+			parts = append(parts, fmt.Sprintf("%s %d", r, t.goneBy[r]))
+			if r == "age" || r == "members" {
+				locked += t.goneBy[r]
+			}
+		}
+		fmt.Printf("  gone by reason: %s\n", strings.Join(parts, " · "))
+		if locked > 0 {
+			fmt.Printf("  %d of those are locked, not dead — retry with \"-cookies-from-browser\" and the right account\n", locked)
+		}
+	}
 	if t.failed > 0 {
 		fmt.Println("failed = transient (network/rate limit) — rerun \"enrich\" to retry just those")
 		if t.failed*5 > t.fetched && t.failed > 20 {
