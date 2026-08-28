@@ -188,12 +188,26 @@ the next run.
 that reason: the subject names in it are what somebody actually watched. They
 belong in no comment, no fixture and no commit message — `classify.go` states
 the rule, and the repo has broken it before. `scripts/gen-leak-patterns.sh`
-turns the file into pre-push patterns so the mirror gate blocks them, derived
-rather than listed by hand so the subject nobody thought of is covered too:
+turns the file into patterns that both git hooks read — the pre-commit guard
+and the pre-push mirror gate — derived rather than listed by hand so the
+subject nobody thought of is covered too:
 
 ```
 scripts/gen-leak-patterns.sh    # after the taxonomy changes
 ```
+
+Two gates, and the earlier one is the one that saves work: the push gate fires
+when the value is already history, and history toward a public mirror is only
+healed by a rewrite plus rebuilding the public repo. The commit guard fires
+while the fix is still one `git restore --staged` away. That is not
+hypothetical here — it is what the last incident cost.
+
+If you forget to regenerate, the gates say so rather than scanning with
+patterns the taxonomy has outgrown: the generated file records the source it
+came from, and a source newer than the patterns blocks the commit until it is
+regenerated. A stale file is the one failure this mechanism cannot survive
+quietly — it loads, it matches, it reports success, and everything added since
+is unprotected.
 
 Generic words that are also somebody's subject ("chess", "jobs", "watchpath")
 live in `scripts/leak-allow.txt` — that list is safe to commit precisely
