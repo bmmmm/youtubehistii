@@ -184,6 +184,22 @@ are never touched, and neither is the classify fingerprint. So a taxonomy you
 dislike costs a rerun, never a re-classification, and hand edits survive until
 the next run.
 
+**That file is also the most private thing here**, and it is gitignored for
+that reason: the subject names in it are what somebody actually watched. They
+belong in no comment, no fixture and no commit message — `classify.go` states
+the rule, and the repo has broken it before. `scripts/gen-leak-patterns.sh`
+turns the file into pre-push patterns so the mirror gate blocks them, derived
+rather than listed by hand so the subject nobody thought of is covered too:
+
+```
+scripts/gen-leak-patterns.sh    # after the taxonomy changes
+```
+
+Generic words that are also somebody's subject ("chess", "jobs", "watchpath")
+live in `scripts/leak-allow.txt` — that list is safe to commit precisely
+because it holds nothing identifying. The generated patterns land inside the
+git dir, a path that cannot be committed.
+
 Steering happens through `config/taxonomy-control.yaml`, which is re-read
 between rounds — `pin` moves one label, `merge` joins subjects, `split` forces
 one apart, `keep` protects a name from the small-tail fold, `stop` ends the

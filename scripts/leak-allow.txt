@@ -1,0 +1,89 @@
+# Terms the pre-push leak gate must NOT block, one per line.
+#
+# gen-leak-patterns.sh derives its patterns from the local taxonomy, which is
+# real watch history — but some of those subjects are generic words the code
+# uses on purpose as illustrations, and a few are games so ubiquitous that
+# naming one says nothing about anybody. Blocking those would make the gate
+# fire on honest pushes, and a gate that cries wolf teaches --no-verify.
+#
+# This file is safe to commit BECAUSE it holds only generic terms. If a term
+# here would identify the person watching, it does not belong in this file —
+# rename the fixture instead.
+#
+# YouTube's own category ids are exempt automatically (read from
+# internal/rules/youtube.go), so they do not need to be listed here.
+
+# Illustration set used across the tests — deliberately not anyone's history.
+jazz
+free-jazz
+bebop
+chess
+schach
+ajedrez
+backgammon
+blitz
+piano
+arduino
+
+# Games ubiquitous enough to carry no signal, used as format examples.
+factorio
+rust
+rust-game
+cs2
+csgo
+counter-strike
+counter-strike-2
+aoe
+esports
+zelda
+
+# Measured, not guessed: every term below actually collided with this repo's
+# own history when the generated patterns were first run against it. Each one
+# is a word the code or its prose uses for its own reasons, and none of them
+# says anything about the person watching. Re-measure after regenerating:
+#   git log --all -p --format=%B | grep -ohE -f "$(git rev-parse --git-common-dir)/leak-patterns" | sort | uniq -c | sort -rn
+watchpath
+jobs
+cats
+pets
+animals
+fails
+memes
+firefox
+howto
+how-to
+startup
+crypto
+raids
+speedrun
+defcon
+detroit
+cars
+slots
+indie
+compilations
+
+# Generic genre and topic words that appear in fixtures and prose.
+techno
+punk
+reggae
+rap
+hip-hop
+hiphop
+pop
+opera
+metal-remix
+fussball
+politics
+news
+talks
+keynote
+conference
+software
+tech
+misc
+miscellaneous
+other
+general
+uncategorized
+unclassified
