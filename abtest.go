@@ -127,7 +127,11 @@ func cmdABTest(args []string) error {
 	fmt.Printf("\n%-14s %8s %8s\n", "", "A", "B")
 	fmt.Printf("%-14s %8d %8d\n", "answered", len(va), len(vb))
 	fmt.Printf("%-14s %8d %8d   (batches the parser rejected)\n", "rejected", statA.rejected, statB.rejected)
-	fmt.Printf("%-14s %7.1fs %7.1fs\n", "wall clock", statA.elapsed.Seconds(), statB.elapsed.Seconds())
+	fmt.Printf("%-14s %7.1fs %7.1fs   (warm, the sample only)\n", "wall clock", statA.elapsed.Seconds(), statB.elapsed.Seconds())
+	fmt.Printf("%-14s %7.1fs %7.1fs   (first call — model load, excluded above)\n", "warm-up", statA.load.Seconds(), statB.load.Seconds())
+	fmt.Printf("%-14s %7.0fms %7.0fms   (per video, warm)\n", "per video",
+		float64(statA.elapsed.Milliseconds())/float64(max(len(sample), 1)),
+		float64(statB.elapsed.Milliseconds())/float64(max(len(sample), 1)))
 
 	// Agreement is NOT quality — two models can agree on the same mistake,
 	// and a disagreement says only that one of them is wrong. It is reported
@@ -218,7 +222,8 @@ func abSample(needLLM []string, items map[string]classify.Item, n int) []string 
 
 type abStat struct {
 	rejected int
-	elapsed  time.Duration
+	load     time.Duration // first call, i.e. what the model cost to become resident
+	elapsed  time.Duration // the sample itself, warm
 }
 
 // abAsk runs one model over the sample. Both models are driven through this
@@ -230,6 +235,21 @@ func abAsk(client *omlx.Client, cfg *rules.Config, items map[string]classify.Ite
 
 	out := make(map[string]classify.LLMVerdict, len(sample))
 	var st abStat
+
+	// Warm the model before the clock starts. oMLX loads a model on first
+	// use, and the load is charged to whichever request happens to be first:
+	// measured here at 10.3s vs 60.8s for two models whose real difference
+	// was a fraction of that, purely because one was already resident from an
+	// earlier run. A warm-up buys nothing in the pipeline (the load is paid
+	// either way) but it is the whole difference between an honest and a
+	// dishonest latency number in a COMPARISON, so it lives here and not
+	// there.
+	loadStart := time.Now()
+	if _, err := client.ChatMax("Reply with the single word: ok", "ok?", 8); err != nil {
+		fmt.Fprintf(os.Stderr, "  %s: warm-up failed: %v\n", client.Model, err)
+	}
+	st.load = time.Since(loadStart)
+
 	start := time.Now()
 	for off := 0; off < len(sample); off += batch {
 		end := min(off+batch, len(sample))
