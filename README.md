@@ -20,6 +20,7 @@ youtubehistii classify                            → data/classified.jsonl
 youtubehistii taxonomy                            → config/taxonomy.yaml (optional)
 youtubehistii report                              → data/out/report.csv + terminal summary
 youtubehistii watchpath                           → data/out/watchpath.html (incl. #/report)
+youtubehistii watchpath -label-holes 150           name the deepest rabbit holes (cached)
 
 youtubehistii run      all of enrich + classify + report in one go, overlapped
 youtubehistii inspect  what the metadata cache holds — category distribution and
@@ -171,6 +172,33 @@ want to pay for a full re-ask. Enriched metadata is never affected.
 If the model spells one subject two ways, fold them with `sub_aliases:` — those
 are applied when verdicts are read back, so folding costs no re-classification.
 
+### Re-asking a verdict by its defect
+
+`-retry` re-asks cached verdicts matched by what is WRONG with them, never by
+age — the fingerprint is untouched, so nothing that already answers cleanly is
+re-asked, and each defect is asked at most once per video:
+
+```
+youtubehistii classify -retry no-sub  -llm-batch 20   # an area with no subject
+youtubehistii classify -retry no-mode -llm-batch 40   # a topic with no mode
+youtubehistii classify -retry unclear -llm-batch 10   # only the ones with usable text
+```
+
+Each round has its own prompt and patches only its own field: a mode round
+leaves the topic, the confidence and the basis exactly as they were. That
+matters twice over — the model answers at temperature 0, so an unchanged
+prompt would return the unchanged answer and cost a request for nothing.
+
+`-retry unclear` refuses most of what it could ask. On a nine-year export
+around 97 % of the `unclear` videos are tombstones whose Takeout "title" is
+their own URL and whose channel line Takeout never wrote: there is no signal
+to re-read, and guessing from the neighbours was measured at 35.5 % area
+accuracy against a 24.4 % baseline for guessing the most common area every
+time. The run says how many it refused. What it does ask are the ones that
+still carry a real title, and those get the channel's other topics as a prior
+(91 % area accuracy, leave-one-out) — shown to the model to weigh, never
+written in as an answer.
+
 ## A taxonomy derived from the corpus
 
 `sub_aliases:` fixes spellings one pair at a time. `taxonomy` does the same
@@ -255,9 +283,10 @@ someone's real subjects is a profile of a person.
 
 `watchpath` renders the same classified views along the time axis instead of
 aggregating them: `data/out/watchpath.html`. It is one self-contained page
-with five views, and the browser's back button walks them backwards because
-every one of them is a real address — `#/`, `#/day/2026-05-04`,
-`#/session/1187`, `#/topics/gaming/factorio`, `#/list`.
+whose every view is a real address, so the browser's back button walks them
+backwards — `#/`, `#/day/2026-05-04`, `#/session/1187`,
+`#/session/1187/chain/2`, `#/topics/gaming/factorio`, `#/list/gaming`,
+`#/holes/depth`, `#/days/night`, `#/algo`, `#/report`.
 
 **The overview** opens on one card per view, each holding a real miniature of
 your own data — the topic tree packed by the same code the full view uses, the
@@ -268,8 +297,10 @@ what it has. The motion honours `prefers-reduced-motion` and each card still
 reads as a still picture without it.
 
 Below the cards, a calendar of the whole span, one cell per day: the
-hue is the area most of that day's main-lane views belonged to, the opacity is
-that day's views against the busiest day of the span. Beside it the areas sit
+hue is the area most of that day's main-lane views belonged to, and what the
+opacity MEANS is yours to pick: views, time spent inside a chain, night share,
+retention, first contacts, or how unusual the day was. The hue never changes
+with it — what a day was about does not depend on the question. Beside it the areas sit
 on a ring, and every arc is one video of an area following another *inside*
 one sitting — a self-loop is a run that stayed on its topic. Click an area and
 the calendar keeps only the days it dominated. Above both, the headline
@@ -286,7 +317,41 @@ view is for.
 **A sitting** is drawn as the path it was: video after video, each edge
 labelled with what the gap says, overlap views branching off sideways to the
 video that was still running, and a coloured bracket where four or more videos
-of one area ran back to back. The same sitting follows underneath as cards.
+of one area ran back to back. Every bracket is a link to that chain
+(`#/session/<i>/chain/<k>`, counted from the top of the diagram), which opens
+a panel saying how deep it went, how long it held, how many channels fed it,
+which topic it was entered from and what ended it. The sitting also carries
+its neighbours, so the deepest view of the page is not a dead end. The same
+sitting follows underneath as cards.
+
+**The rabbit holes** (`#/holes`) rank every chain — all of them, virtualised
+rather than capped — by depth, span, length, channels, retention or date, with
+an area filter. The sort key rides in the hash, so re-sorting is a step the
+back button undoes and a sorted list is a link worth sharing. Each row says
+where the run was entered from and what let you out of it. With
+`watchpath -label-holes N` the chat model gives the N deepest a short name of
+their own; replies are cached under their prompt, so a rerun asks nothing, and
+the page reads exactly the same without a single label.
+
+**The days** (`#/days`) rank the 2374 days that carried a sitting by views,
+chain depth, night share, length, spread, retention, new channels, date — or
+by "most unusual", which is the day's STRONGEST percentile rank across four of
+those, never a weighted blend: a weight is an invented number that looks
+exactly like the measured ones beside it. A row therefore says "top 0.4 % by
+chain depth", which can be checked against the distribution. A day itself
+gained its neighbours, measurement tiles that open what they name, and the
+three weeks around it as bars.
+
+**The algorithm, backwards** (`#/algo`) turns three signals that were only
+decorative around. The edge label is the reward signal: a scatter of share of
+your main lane against share watched through, where the bottom right is what
+kept being served and kept being clicked away. The position in a sitting is
+the drift: you chose the first video, the sidebar chose the seventh, and the
+difference between those columns is the recommendation seen from the other
+side. A first sighting is an introduction, ranked by what it turned into, each
+row opening the sitting it began in. Every panel carries the same caveat:
+Takeout records what was STARTED, never what was offered, so all of it is
+inference about the response.
 
 **The topic tree** is the other cut through the same views: areas holding
 subjects holding channels, drawn as a cluster of nested circles. Clicking a

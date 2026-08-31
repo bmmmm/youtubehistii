@@ -31,10 +31,10 @@ const HOLE_SORTS = [
     note: "most recent first — the chains are already in that order" },
 ];
 
-// HOLE_CAP is printed next to the list rather than hidden. Same rule the
-// transition ring follows: a drawing that silently drops rows claims to be
-// the whole list and is not.
-const HOLE_CAP = 300;
+// RANK_H is the height of one ranked row — two lines, the facts and the
+// sentence under them. Fixed, because that is what lets the list be
+// virtualised: row i sits at i*RANK_H with nothing to measure.
+const RANK_H = {{.RankHeight}};
 
 // holeFacts caches chainFacts per chain: a sort touches every chain, and the
 // facts are a walk over its rows. One pass, then sorting is free.
@@ -114,14 +114,20 @@ function renderHoles(root, sortId, areaName_) {
   if (sort.id !== "date") {
     sorted.sort((a, b) => sort.of(b) - sort.of(a) || a.ci - b.ci);
   }
-  const shown = sorted.slice(0, HOLE_CAP);
-  const top = Math.max(1, sort.id === "date" ? 1 : sort.of(shown[0]));
+  const top = Math.max(1, sort.id === "date" ? 1 : sort.of(sorted[0]));
+  root.appendChild($("p", "muted",
+    sorted.length.toLocaleString() + " of them, all of them — scroll."));
 
   const panel = $("div", "panel");
-  for (const f of shown) {
+  root.appendChild(panel);
+  // Virtualised, so the whole ranking is here rather than its first 300: the
+  // tail of a rabbit-hole list is where the surprising ones are.
+  return virtualRows(panel, sorted.length, RANK_H, i => {
+    const f = sorted[i];
     const c = D.chains[f.ci];
     const k = chainsOf(c[C_SESS]).indexOf(f.ci);
     const hash = "#/session/" + c[C_SESS] + "/chain/" + k;
+    const wrap = $("div", "rank");
     const line = $("div", "rline");
     const a = $("a", "rrow", null);
     a.href = hash;
@@ -137,21 +143,16 @@ function renderHoles(root, sortId, areaName_) {
     a.appendChild(box);
     line.appendChild(a);
     line.appendChild(goArrow(hash, "open " + chainName(f.ci)));
-    panel.appendChild(line);
+    wrap.appendChild(line);
     // The second line is the reverse-algorithm sentence: which topic the
     // chain was fallen into from, and what finally let the reader out.
     const why = [];
     if (f.door) why.push("entered from " + f.door);
     why.push(f.chans === 1 ? "one channel" : f.chans + " channels");
     if (f.exit) why.push("ended by " + EDGE_TEXT[f.exit]);
-    panel.appendChild($("p", "rwhy", why.join(" · ")));
-  }
-  if (sorted.length > shown.length) {
-    panel.appendChild($("p", "muted",
-      "The " + HOLE_CAP + " deepest are drawn; " +
-      (sorted.length - shown.length).toLocaleString() + " more are not."));
-  }
-  root.appendChild(panel);
+    wrap.appendChild($("p", "rwhy", why.join(" · ")));
+    return wrap;
+  }, "holes\n" + sort.id + "\n" + (areaName_ || ""));
 }
 </script>
 `
@@ -186,8 +187,6 @@ const DAY_SORTS = [
     note: "most recent first" },
 ];
 
-const DAY_CAP = 300;
-
 // peakLine says what a day's rank MEANS, in the distribution's own words.
 // "top 0.4 % by chain depth" can be checked against the data; a score of 87
 // cannot.
@@ -221,12 +220,16 @@ function renderDays(root, sortId) {
   // equal days on top, so the base order is reversed once here.
   const rows = D.days.map((d, i) => [d, i]).reverse();
   if (sort.id !== "date") rows.sort((a, b) => sort.of(b[0]) - sort.of(a[0]) || b[1] - a[1]);
-  const shown = rows.slice(0, DAY_CAP);
-  const top = Math.max(1e-9, sort.of(shown[0][0]));
+  const top = Math.max(1e-9, sort.of(rows[0][0]));
+  root.appendChild($("p", "muted",
+    rows.length.toLocaleString() + " of them, all of them — scroll."));
 
   const panel = $("div", "panel");
-  for (const [d, di] of shown) {
+  root.appendChild(panel);
+  return virtualRows(panel, rows.length, RANK_H, ri => {
+    const [d, di] = rows[ri];
     const date = dayDate(d[DY_ED]);
+    const wrap = $("div", "rank");
     const line = $("div", "rline");
     const a = $("a", "rrow", null);
     a.href = "#/day/" + date;
@@ -241,21 +244,16 @@ function renderDays(root, sortId) {
     a.appendChild(box);
     line.appendChild(a);
     line.appendChild(goArrow("#/day/" + date, "open " + date));
-    panel.appendChild(line);
+    wrap.appendChild(line);
 
     const why = [peakLine(d)];
     if (d[DY_CHAINMAX] > 0) why.push("longest chain " + d[DY_CHAINMAX]);
     if (d[DY_NIGHT] > 0) why.push(Math.round(100 * d[DY_NIGHT] / d[DY_VIEWS]) + "% after " + {{.NightFrom}});
     why.push(d[DY_AREAN] === 1 ? "one area" : d[DY_AREAN] + " areas");
     if (d[DY_NEWCH] > 0) why.push(d[DY_NEWCH] + " new " + (d[DY_NEWCH] === 1 ? "channel" : "channels"));
-    panel.appendChild($("p", "rwhy", why.filter(Boolean).join(" · ")));
-  }
-  if (rows.length > shown.length) {
-    panel.appendChild($("p", "muted",
-      "The first " + DAY_CAP + " are drawn; " +
-      (rows.length - shown.length).toLocaleString() + " more are not."));
-  }
-  root.appendChild(panel);
+    wrap.appendChild($("p", "rwhy", why.filter(Boolean).join(" · ")));
+    return wrap;
+  }, "days\n" + sort.id);
 }
 </script>
 `

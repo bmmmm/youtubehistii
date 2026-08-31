@@ -19,6 +19,10 @@ import (
 // single-line titles, which is what the ellipsis is for.
 const rowHeightPx = 56
 
+// rankRowPx is the same idea for the two ranking views, whose rows carry a
+// second line: the facts, then the sentence that explains them.
+const rankRowPx = 62
+
 // Row type tags, first element of every serialized row.
 const (
 	rowSession = 0
@@ -465,6 +469,7 @@ func RenderWatchPathOpts(p *Path, st *Stats, generated time.Time, o WatchPathOpt
 		"Data":       template.JS(raw),
 		"P":          p,
 		"RowHeight":  rowHeightPx,
+		"RankHeight": rankRowPx,
 		"Generated":  generated.Format("2006-01-02 15:04"),
 		"SessionGap": fmt.Sprintf("%.0f", sessionGap.Minutes()),
 		"LongVideo":  fmt.Sprintf("%d", longVideoS/60),

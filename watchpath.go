@@ -83,6 +83,12 @@ func cmdWatchPath(args []string) error {
 	fmt.Println()
 	fmt.Printf("%d views suspected of overlapping, %d inside a same-area chain\n",
 		ps.OverlapViews, ps.RabbitViews)
+	if len(path.Chains) > 0 {
+		c := path.Chains[ps.DeepestChain]
+		fmt.Printf("%d rabbit holes, deepest %d videos of %s on %s\n",
+			len(path.Chains), c.Len, c.Area,
+			path.Sessions[c.Session].Start.Format("2006-01-02"))
+	}
 	if len(path.Days) > 0 {
 		d := path.Days[ps.BusiestDay]
 		fmt.Printf("%d days carried a sitting (%s … %s), busiest %s with %d views\n",

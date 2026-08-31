@@ -281,6 +281,10 @@ g.chain:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px; }
    the row it explains rather than beside it, so the columns above stay a
    table. */
 .rwhy { margin: -.15rem 0 .45rem .4rem; font-size: .76rem; color: var(--muted); }
+/* A ranked row is two lines of fixed total height, which is what lets the
+   whole ranking be virtualised instead of capped at its first 300. */
+.rank { padding: .1rem 0; }
+.rank .rwhy { margin: 0 0 0 .4rem; }
 /* Small multiples: one sparkline per area, each against its OWN peak. A
    shared scale would flatten every small area into a flat line, and the
    question these ask is the shape over time, not the size. */
@@ -336,7 +340,14 @@ so an evening that runs past midnight stays on that evening.
   <span><b>moved on</b> under half</span>
   <span><b>overlap suspected</b> started while a video of {{.LongVideo}} min or more
     from another area was still running — parallel, or simply abandoned; the export cannot tell</span>
-  <span><b>chain</b> {{.RabbitLen}}+ videos of one area, under {{.RabbitGap}} min apart</span>
+  <span><b>chain</b> {{.RabbitLen}}+ videos of one area, under {{.RabbitGap}} min apart —
+    each one has its own page, ranked at #/holes</span>
+  <span><b>night</b> started between {{.NightFrom}}:00 and {{.NightTo}}:00, local time</span>
+  <span><b>held you</b> the share watched through, counted only over videos whose
+    length is known — the rest are left out rather than counted as zero</span>
+  <span><b>most unusual</b> a day's strongest percentile rank across views, chain
+    depth, night share and spread; never a blend, so no invented weight sits
+    next to a measured number</span>
 </div>
 </details>
 
@@ -664,13 +675,6 @@ function go(hash) { location.hash = hash; }
 const pageTail = `<script>
 // ---- level 4: every view as one list ----------------------------------
 
-// The list keeps its own scroll offset, because coming back to it from a
-// session is a return, not a fresh visit. Keyed by the filter: an offset
-// measured in the whole list means nothing in a list of twelve views, and one
-// shared counter would hand the way back to "all views" a position that was
-// clamped away while a subject was showing.
-const listScroll = new Map();
-
 // NO_SUBJECT is what Go calls the empty subject bucket in the topic tree
 // (NoSubject in watchpath.go). The same view carries the empty string on the
 // timeline, so a link out of the tree has to fold the two names into one
@@ -718,49 +722,27 @@ function listRows(area, sub) {
   return out;
 }
 
-function renderList(root, area, sub) {
-  const sel = listRows(area, sub);
-  const label = sub ? area + " / " + sub : area;
-  // The key is the filter itself, so every cut keeps its own place in the
-  // list and the whole list keeps the one it had.
-  const key = sel.hits ? area + "\n" + (sub || "") : "";
+// virtualRows is the one virtual list on this page. Only the rows near the
+// viewport exist in the DOM; a spacer of count*rowH gives the scrollbar the
+// right length, and each row is placed absolutely at i*rowH.
+//
+// Extracted from the timeline so the two rankings can drop their caps: a
+// list of the top 300 of 1068 rabbit holes is a list that stops answering
+// exactly where the tail gets interesting, and a second copy of this loop
+// is how the two would drift.
+//
+// key names the scroll position to remember. Coming back to a list from a
+// row is a return, not a fresh visit — and an offset measured in one list
+// means nothing in another, which is why it is keyed rather than shared.
+const listScroll = new Map();
 
-  if (sel.hits) {
-    root.appendChild($("p", "muted", sel.idx.length
-      ? "Only the views of " + label + ", newest first, in the sittings they " +
-        "were watched in. A sitting line still describes the whole sitting; the " +
-        "count after it says how many of its videos are listed here."
-      : "No view on this timeline carries " + label + "."));
-  }
-
+function virtualRows(root, count, rowH, rowEl, key) {
   const path = $("div"); path.id = "path";
   const spacer = $("div"); spacer.id = "spacer";
   path.appendChild(spacer);
   root.appendChild(path);
-  spacer.style.height = (sel.idx.length * RH) + "px";
-  path.style.setProperty("--rh", RH + "px");
-
-  function rowEl(i) {
-    const ri = sel.idx[i];
-    const r = D.rows[ri];
-    const el = $("div", "row");
-    el.style.top = (i * RH) + "px";
-    if (r[0] === 0) {
-      const wrap = $("div", "sess");
-      const when = $("span", "when", stamp(r[R_TS]));
-      wrap.appendChild(hit(when, "#/session/" + rowToSession.get(ri), "open this sitting"));
-      // A session row and a D.sess entry carry span, count and gap at the
-      // same offsets, which is what lets one formatter serve both.
-      const n = sel.hits ? sel.hits.get(ri) : 0;
-      wrap.appendChild($("span", "gap", sessionLine(r) +
-        (n ? " · " + n + " of them listed here" : "")));
-      el.appendChild(wrap);
-      return el;
-    }
-    if (isOverlap(r)) el.classList.add("lane2");
-    el.appendChild(viewCard(r));
-    return el;
-  }
+  spacer.style.height = (count * rowH) + "px";
+  path.style.setProperty("--rh", rowH + "px");
 
   // Rows kept above and below the viewport. Generous on purpose: a scroll
   // event lands after the frame it belongs to, so without a buffer a fast
@@ -771,8 +753,8 @@ function renderList(root, area, sub) {
 
   function draw() {
     const top = scrollY - path.offsetTop;
-    const from = Math.max(0, Math.floor(top / RH) - OVERSCAN);
-    const to = Math.min(sel.idx.length - 1, Math.ceil((top + innerHeight) / RH) + OVERSCAN);
+    const from = Math.max(0, Math.floor(top / rowH) - OVERSCAN);
+    const to = Math.min(count - 1, Math.ceil((top + innerHeight) / rowH) + OVERSCAN);
     if (from === first && to === last) return;
     for (const [i, el] of live) {
       if (i < from || i > to) { el.remove(); live.delete(i); }
@@ -780,6 +762,8 @@ function renderList(root, area, sub) {
     for (let i = from; i <= to; i++) {
       if (live.has(i)) continue;
       const el = rowEl(i);
+      el.classList.add("row");
+      el.style.top = (i * rowH) + "px";
       path.appendChild(el);
       live.set(i, el);
     }
@@ -805,6 +789,45 @@ function renderList(root, area, sub) {
     removeEventListener("scroll", schedule);
     removeEventListener("resize", schedule);
   };
+}
+
+function renderList(root, area, sub) {
+  const sel = listRows(area, sub);
+  const label = sub ? area + " / " + sub : area;
+  // The key is the filter itself, so every cut keeps its own place in the
+  // list and the whole list keeps the one it had.
+  const key = sel.hits ? area + "\n" + (sub || "") : "";
+
+  if (sel.hits) {
+    root.appendChild($("p", "muted", sel.idx.length
+      ? "Only the views of " + label + ", newest first, in the sittings they " +
+        "were watched in. A sitting line still describes the whole sitting; the " +
+        "count after it says how many of its videos are listed here."
+      : "No view on this timeline carries " + label + "."));
+  }
+
+  function rowEl(i) {
+    const ri = sel.idx[i];
+    const r = D.rows[ri];
+    const el = $("div");
+    if (r[0] === 0) {
+      const wrap = $("div", "sess");
+      const when = $("span", "when", stamp(r[R_TS]));
+      wrap.appendChild(hit(when, "#/session/" + rowToSession.get(ri), "open this sitting"));
+      // A session row and a D.sess entry carry span, count and gap at the
+      // same offsets, which is what lets one formatter serve both.
+      const n = sel.hits ? sel.hits.get(ri) : 0;
+      wrap.appendChild($("span", "gap", sessionLine(r) +
+        (n ? " · " + n + " of them listed here" : "")));
+      el.appendChild(wrap);
+      return el;
+    }
+    if (isOverlap(r)) el.classList.add("lane2");
+    el.appendChild(viewCard(r));
+    return el;
+  }
+
+  return virtualRows(root, sel.idx.length, RH, rowEl, key);
 }
 
 // rowToSession maps a session header row back to its index in D.sess, which
