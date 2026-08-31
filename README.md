@@ -37,9 +37,21 @@ burning the rest of the run marking everything failed, then eases back off
 once chunks come through cleanly. The progress line says so when it happens,
 so a throttled run does not look like a hung one.
 
-Videos that are gone for good are tombstoned — skipped on retries but kept and
-counted in the report. That includes the ones no anonymous request will ever
-reach: deleted, private, age-restricted and members-only.
+Videos that are gone are tombstoned — skipped on later runs but kept and
+counted in the report. Each tombstone records **why**, because "gone" covers
+two different things: `private`, `removed`, `terminated` and `unavailable` are
+gone for everyone, while `age` and `members` are gone only for a caller
+without the credential. The run prints the split:
+
+```
+done: 2 fetched, 3499 gone for good (tombstoned, kept in the report), 7 failed
+  gone by reason: private 2109 · unavailable 676 · age 340 · terminated 168 · removed 156 · members 50
+```
+
+`-retry-gone` reopens tombstones that a credential might lift: `locked`
+(age + members), `unknown` (written before reasons were recorded), `all`, or a
+comma-separated list of reasons. Without it a tombstone is final, which is the
+point of writing one.
 
 Enrich fetches anonymously. `-cookies-from-browser auto` (or a browser name,
 with the full `BROWSER[+KEYRING][:PROFILE]` syntax) hands your browser cookies
@@ -47,7 +59,9 @@ to yt-dlp, which can recover age-restricted videos — but only if that browser
 is actually signed in to YouTube, and at the price of making every request
 attributable to that Google account instead of just your IP. On a browser that
 is merely installed it buys nothing: cookies extract fine and the age wall
-stays up. Hence off by default. If a cookie source cannot be opened, enrich
+stays up — measured twice, 220 cookies out of Chrome and a 200-video sample
+with Firefox cookies active, both recovering exactly zero extra videos. A
+cookie jar is not an account. Hence off by default. If a cookie source cannot be opened, enrich
 warns once and carries on without it rather than failing the run.
 
 ### run: the wave pipeline
@@ -326,6 +340,29 @@ because it asks what was watched.
 The Takeout export has no per-view watch duration. Duration-weighted numbers
 in the report use the full video length and are labeled as an upper bound
 ("up to X hours"); view counts are shown alongside as the exact metric.
+
+A long history also has holes, and they are not a shortcoming of the
+classifier. Over the years a noticeable share of any watch history points at
+videos that no longer exist — on the corpus this was developed against, about
+one view in eight. For those, Takeout keeps no title and no channel, just the
+bare URL, so nothing can place them in a topic. The report does not hide them
+under a silent "unclear"; it says what happened instead:
+
+```
+gone (4198 views, 12% — no metadata survives them, so no topic): made private 2531 ·
+  unavailable 821 · age-restricted 440 · channel terminated 168 · removed by the uploader 167 ·
+  members-only 65
+  505 of those are locked rather than deleted (age-restricted or members-only)
+```
+
+The largest group by far is videos their uploader made private, which no
+amount of fetching recovers. Three signals were measured for a way to guess a
+topic for them anyway — the channel from Takeout, the surrounding session, and
+the rewatch rate — and none carries. The rewatch rate is the interesting one:
+if the vanished videos were secretly a music block (plausible, music videos
+disappear constantly) they would be rewatched like music, roughly 1.5 times
+each. They are rewatched 1.1 times, mid-table with the talk-shaped
+categories — a cross-section, not a hidden category.
 
 ## License
 
