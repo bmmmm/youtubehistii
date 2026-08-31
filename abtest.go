@@ -182,10 +182,21 @@ func cmdABTest(args []string) error {
 		*judge, len(disagree), wins.a, wins.b, wins.neither, wins.unparsed)
 	// The verdict the caller came for, stated as a rule and not as a vibe:
 	// the candidate has to WIN the disagreements, not merely differ.
+	//
+	// The quorum is the load-bearing part. A referee whose replies do not
+	// parse still produces a ratio, and a ratio computed from 7 of 61 reads
+	// exactly like one computed from 61 of 61 — that is how a broken
+	// measurement gets shipped as a finding. Below half decided, this refuses
+	// to conclude and says which half is missing.
 	decided := wins.a + wins.b
 	switch {
 	case decided == 0:
 		fmt.Println("verdict: the referee decided nothing — the comparison is inconclusive")
+	case decided*2 < len(disagree):
+		fmt.Printf("verdict: NONE — the referee only decided %d of %d disagreements (%.0f %%).\n"+
+			"  Its replies did not fit the expected shape (see the warnings above), so any\n"+
+			"  ratio from them would be noise. Try another -judge model.\n",
+			decided, len(disagree), pct(decided, len(disagree)))
 	case wins.b > wins.a:
 		fmt.Printf("verdict: the candidate wins %.0f %% of the decided disagreements (%d of %d)\n",
 			pct(wins.b, decided), wins.b, decided)
@@ -355,7 +366,16 @@ func abJudge(client *omlx.Client, items map[string]classify.Item,
 				w.b++
 			}
 		}
-		w.unparsed += len(ids) - len(seen)
+		// A referee that answers in the wrong shape is invisible otherwise:
+		// its lines simply do not parse, the counters stay small, and the
+		// verdict below reads as confident because it divides one small
+		// number by another. Show the reply the moment it does not fit, the
+		// way classify's parse warnings do.
+		if missing := len(ids) - len(seen); missing > 0 {
+			w.unparsed += missing
+			fmt.Fprintf(os.Stderr, "  referee: %d of %d lines unreadable, reply began: %q\n",
+				missing, len(ids), abTruncate(reply, 200))
+		}
 		fmt.Printf("  referee %d/%d\n", end, len(disagree))
 	}
 	return w
@@ -380,6 +400,14 @@ func writeABItem(u *strings.Builder, item classify.Item, indent string) {
 		}
 		fmt.Fprintf(u, "%screator tags: %s\n", indent, strings.Join(tags, ", "))
 	}
+}
+
+func abTruncate(s string, n int) string {
+	s = strings.ReplaceAll(strings.TrimSpace(s), "\n", " / ")
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
 
 func abArea(topic string) string {
