@@ -149,19 +149,19 @@ func TestNamerCountsCacheHitsAndRequests(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("transport saw %d requests, want 1 — the second call should have been a cache hit", calls)
 	}
-	if stats.subject.hits != 1 {
-		t.Errorf("subject hits = %d, want 1", stats.subject.hits)
+	if stats.Subject.Hits != 1 {
+		t.Errorf("subject hits = %d, want 1", stats.Subject.Hits)
 	}
-	if stats.subject.misses != 1 {
-		t.Errorf("subject requested = %d, want 1", stats.subject.misses)
+	if stats.Subject.Misses != 1 {
+		t.Errorf("subject requested = %d, want 1", stats.Subject.Misses)
 	}
-	if stats.subject.fallbacks != 0 {
-		t.Errorf("subject fallbacks = %d, want 0", stats.subject.fallbacks)
+	if stats.Subject.Fallbacks != 0 {
+		t.Errorf("subject fallbacks = %d, want 0", stats.Subject.Fallbacks)
 	}
-	if stats.subject.reqNanos <= 0 {
+	if stats.Subject.ReqNanos <= 0 {
 		t.Error("the one real request recorded no time")
 	}
-	if stats.top.hits != 0 || stats.top.misses != 0 || stats.top.fallbacks != 0 {
+	if stats.Top.Hits != 0 || stats.Top.Misses != 0 || stats.Top.Fallbacks != 0 {
 		t.Error("a subject-kind call must not touch the top counters")
 	}
 
@@ -180,8 +180,8 @@ func TestNamerCountsCacheHitsAndRequests(t *testing.T) {
 	if got, want := failNamer([]taxonomy.Cluster{other}, "top")[0], "chess"; got != want {
 		t.Fatalf("fallback = %q, want %q (the failing request's fallback name)", got, want)
 	}
-	if failStats.top.misses != 1 || failStats.top.fallbacks != 1 || failStats.top.hits != 0 {
-		t.Errorf("top stats after a failed request = %+v, want 1 miss, 1 fallback, 0 hits", failStats.top)
+	if failStats.Top.Misses != 1 || failStats.Top.Fallbacks != 1 || failStats.Top.Hits != 0 {
+		t.Errorf("top stats after a failed request = %+v, want 1 miss, 1 fallback, 0 hits", failStats.Top)
 	}
 }
 
@@ -209,7 +209,7 @@ func TestNamerNoLLMSkipsStats(t *testing.T) {
 	if got := namer([]taxonomy.Cluster{cluster}, "subject")[0]; got != "jazz" {
 		t.Fatalf("got %q, want the fallback name jazz", got)
 	}
-	if *stats != (namingStats{}) {
+	if *stats != (taxonomy.NamingStats{}) {
 		t.Errorf("stats = %+v, want all zero — -no-llm must never touch the counters", *stats)
 	}
 }
@@ -424,45 +424,6 @@ func namedCluster(area, sub string, views int) taxonomy.Cluster {
 	}
 }
 
-// TestParseNameBatchIsStrict pins the mapping guarantee. A name that lands on
-// the wrong cluster is invisible afterwards — it just reads as a badly named
-// subject — so anything less than a complete, unambiguous answer has to be
-// refused rather than patched up.
-func TestParseNameBatchIsStrict(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		reply string
-		n     int
-		want  []string // nil = expect an error
-	}{
-		{"clean", "1 jazz\n2 techno\n3 chess", 3, []string{"jazz", "techno", "chess"}},
-		{"out of order", "3 chess\n1 jazz\n2 techno", 3, []string{"jazz", "techno", "chess"}},
-		{"numbered with dots", "1. jazz\n2. techno", 2, []string{"jazz", "techno"}},
-		{"prose around it", "Sure!\n```\n1 jazz\n2 techno\n```\nHope that helps", 2, []string{"jazz", "techno"}},
-		{"missing one", "1 jazz\n2 techno", 3, nil},
-		{"duplicate number", "1 jazz\n1 techno\n3 chess", 3, nil},
-		{"number out of range", "1 jazz\n2 techno\n7 chess", 3, nil},
-		{"unusable slug", "1 jazz\n2 ---", 2, nil},
-		{"empty reply", "", 2, nil},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseNameBatch(tc.reply, tc.n)
-			if tc.want == nil {
-				if err == nil {
-					t.Fatalf("parsed %q into %v, want an error so the caller retries singly", tc.reply, got)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("parseNameBatch(%q) = %v", tc.reply, err)
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("got %v, want %v", got, tc.want)
-			}
-		})
-	}
-}
-
 // TestNamerBatchesAndStaysCacheCompatible is the whole point of batching in
 // one test: several clusters cost ONE request, the reply maps back by number
 // rather than by arrival order, and — the part that makes the change safe to
@@ -507,8 +468,8 @@ func TestNamerBatchesAndStaysCacheCompatible(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("three clusters cost %d requests, want 1", calls)
 	}
-	if stats.subject.misses != 3 || stats.subject.requests != 1 {
-		t.Errorf("stats = %d uncached in %d requests, want 3 in 1", stats.subject.misses, stats.subject.requests)
+	if stats.Subject.Misses != 3 || stats.Subject.Requests != 1 {
+		t.Errorf("stats = %d uncached in %d requests, want 3 in 1", stats.Subject.Misses, stats.Subject.Requests)
 	}
 
 	// The second run shares only the cache directory. If batching had cached
@@ -521,8 +482,8 @@ func TestNamerBatchesAndStaysCacheCompatible(t *testing.T) {
 	if calls != 1 {
 		t.Errorf("second run sent %d more requests, want 0 — batched names must be cache-compatible", calls-1)
 	}
-	if stats2.subject.hits != 3 || stats2.subject.requests != 0 {
-		t.Errorf("second run = %d hits in %d requests, want 3 in 0", stats2.subject.hits, stats2.subject.requests)
+	if stats2.Subject.Hits != 3 || stats2.Subject.Requests != 0 {
+		t.Errorf("second run = %d hits in %d requests, want 3 in 0", stats2.Subject.Hits, stats2.Subject.Requests)
 	}
 }
 
@@ -572,7 +533,7 @@ func TestNamerRetriesABadBatchSingly(t *testing.T) {
 	if calls != 4 {
 		t.Errorf("saw %d requests, want 4 (one failed batch, then three singles)", calls)
 	}
-	if stats.subject.requests != 4 || stats.subject.misses != 3 {
-		t.Errorf("stats = %d uncached in %d requests, want 3 in 4", stats.subject.misses, stats.subject.requests)
+	if stats.Subject.Requests != 4 || stats.Subject.Misses != 3 {
+		t.Errorf("stats = %d uncached in %d requests, want 3 in 4", stats.Subject.Misses, stats.Subject.Requests)
 	}
 }

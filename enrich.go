@@ -279,7 +279,7 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 		// about what it found — which is the whole question when deciding
 		// whether a retry with credentials is worth it.
 		goneBy map[string]int
-		err                               error
+		err    error
 	}
 	var (
 		mu sync.Mutex
