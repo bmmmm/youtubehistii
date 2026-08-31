@@ -46,6 +46,15 @@ type Verdict struct {
 type Item struct {
 	rules.Input
 	Area string
+	// Context is what the video's own metadata does not say: topics already
+	// assigned to OTHER videos of the same channel. A prior, not a verdict —
+	// it goes into the prompt so the model can weigh it against the title,
+	// never into the answer directly. Measured at 91 % area accuracy
+	// leave-one-out, which is why it is worth showing; available for only 86
+	// of 3254 unclear tombstones, which is why it is a targeted retry and
+	// not a campaign. Only ever set for that retry set: the normal prompt
+	// must stay byte-identical or verdicts drift without a fingerprint bump.
+	Context []string
 }
 
 // Basis values: what metadata the LLM saw when it judged the video.
@@ -62,6 +71,13 @@ type LLMVerdict struct {
 	Model      string  `json:"model"`
 	Basis      string  `json:"basis,omitempty"`    // legacy entries without it count as title-only
 	Taxonomy   string  `json:"taxonomy,omitempty"` // rules.Config.Fingerprint at judgement time
+	// Retried names the targeted re-asks already run for this video ("sub",
+	// "mode", "context"), so a -retry pass is idempotent: a video the model
+	// STILL could not give a sub or a mode is not asked the same narrow
+	// question on every run. It is deliberately not part of Stale — a marker
+	// records what was asked, it does not expire; the ~30k existing cache
+	// files simply read as nil (everything selectable once).
+	Retried []string `json:"retried,omitempty"`
 }
 
 // Stale reports whether a cached verdict should be re-asked.
@@ -160,6 +176,9 @@ func writeInputFields(u *strings.Builder, item Item, indent string) {
 		}
 		fmt.Fprintf(u, "%screator tags: %s\n", indent, strings.Join(tags, ", "))
 	}
+	if len(item.Context) > 0 {
+		fmt.Fprintf(u, "%sother videos on this channel: %s\n", indent, strings.Join(item.Context, ", "))
+	}
 }
 
 // BuildBatchPrompt renders one prompt for many videos. The reply format is
@@ -195,6 +214,189 @@ func BuildBatchPrompt(cfg *rules.Config, items []Item, seeds map[string][]string
 		writeInputFields(&u, item, "   ")
 	}
 	return b.String(), u.String()
+}
+
+// BuildModePrompt asks ONLY the mode, for videos whose topic is settled but
+// whose mode a batch reply left out (normalizeFields' "3 fields" case turned
+// the omission into "cannot tell"). One word per line is the shortest
+// constrained reply there is, so this round batches wider than the full one —
+// the cost sits in the request, not in the tokens it generates.
+//
+// "unclear" is deliberately not offered: consume/learn/mixed is a total
+// partition of WHY something was watched, and "mixed" is the honest hedge —
+// an escape hatch would buy nothing "mixed" does not already say. That is
+// the opposite of the topic level, where refusing IS an answer.
+//
+// topics runs parallel to items: the settled topic is shown per video, so
+// the model judges "why watched" with the "what" already fixed.
+func BuildModePrompt(items []Item, topics []string) (system, user string) {
+	var b strings.Builder
+	b.WriteString("You judge WHY a video was watched, from its metadata.\n")
+	fmt.Fprintf(&b, "You get %d numbered videos. Reply with EXACTLY one line per video, in the same order:\n", len(items))
+	b.WriteString("<n> <mode>\n")
+	b.WriteString("mode is exactly one of consume, learn or mixed — one word, nothing else:\n")
+	b.WriteString("  consume = watched for entertainment (let's plays, esports, concerts, memes)\n")
+	b.WriteString("  learn   = watched to learn (talks, tutorials, documentaries)\n")
+	b.WriteString("  mixed   = genuinely both\n")
+	b.WriteString("Every video has one of the three. If it is a toss-up, answer mixed.\n")
+	b.WriteString("No prose, no code fences, no JSON.\n")
+	b.WriteString("Example: 2 consume")
+
+	var u strings.Builder
+	for i, item := range items {
+		fmt.Fprintf(&u, "%d.\n", i+1)
+		writeInputFields(&u, item, "   ")
+		fmt.Fprintf(&u, "   topic: %s\n", topics[i])
+	}
+	return b.String(), u.String()
+}
+
+// ParseBatchModes parses the one-word-per-line reply of a mode prompt; the
+// mode on line n belongs to ids[n-1]. STRICT on the mapping, exactly like
+// ParseBatchVerdicts. An "unclear" reply is ACCEPTED and maps to the empty
+// mode — the model saying "cannot tell" is an answer, and refusing it would
+// turn one legitimate hedge into a single request per video of the batch.
+// A topic where the mode belongs is an error: the model answered the wrong
+// question, and the single-request fallback should re-ask it properly.
+func ParseBatchModes(ids []string, reply string) (map[string]string, error) {
+	out := make(map[string]string, len(ids))
+	seen := make(map[int]bool, len(ids))
+	for _, line := range strings.Split(reply, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			continue // prose, fences, blank lines — completeness is checked below
+		}
+		m := lineNumberRe.FindStringSubmatch(fields[0])
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		mode, modeOK := parseMode(fields[1])
+		if n < 1 || n > len(ids) {
+			if modeOK {
+				return nil, fmt.Errorf("mode for line %d of %d", n, len(ids))
+			}
+			continue
+		}
+		if seen[n] {
+			return nil, fmt.Errorf("duplicate mode for line %d", n)
+		}
+		seen[n] = true
+		if !modeOK {
+			return nil, fmt.Errorf("line %d: invalid mode %q", n, fields[1])
+		}
+		out[ids[n-1]] = mode
+	}
+	if len(out) != len(ids) {
+		for n := 1; n <= len(ids); n++ {
+			if !seen[n] {
+				return nil, fmt.Errorf("reply misses %d of %d modes (first missing: line %d)", len(ids)-len(out), len(ids), n)
+			}
+		}
+	}
+	return out, nil
+}
+
+// BuildSubPrompt asks ONLY the sub level, for videos whose area is settled
+// but whose verdict left the sub off. One area per batch on purpose: the
+// prompt then carries only that area's seeds, and "which subject within THIS
+// area" is a sharper question than the generic one — the model left these
+// subs off when the full prompt made them optional, so here the sub is the
+// whole answer.
+func BuildSubPrompt(area string, seeds []string, items []Item) (system, user string) {
+	var b strings.Builder
+	b.WriteString("You name the SUBJECT of a YouTube video: the game, the band, the show, " +
+		"the language, the team — the specific thing it is about.\n")
+	fmt.Fprintf(&b, "All %d videos below are in the area %q. The area is already decided; "+
+		"you supply the second level only.\n", len(items), area)
+	b.WriteString("Reply with EXACTLY one line per video, in the same order:\n")
+	b.WriteString("<n> <sub> <confidence>\n")
+	b.WriteString("<sub> is ONE short lowercase slug (a-z, 0-9, dashes) — never the area " +
+		"again, never a mode, never a sentence, never just the channel.\n")
+	if len(seeds) > 0 {
+		b.WriteString("Subs already in use in this area — reuse one whenever it fits, invent a new one only if none does:\n")
+		fmt.Fprintf(&b, "  %s\n", strings.Join(seeds, ", "))
+	}
+	b.WriteString("Answer \"?\" as the sub only if the metadata names no subject at all.\n")
+	b.WriteString("No prose, no code fences, no JSON.\n")
+	b.WriteString("Example: 2 late-night-show 0.8")
+
+	var u strings.Builder
+	for i, item := range items {
+		fmt.Fprintf(&u, "%d.\n", i+1)
+		writeInputFields(&u, item, "   ")
+	}
+	return b.String(), u.String()
+}
+
+// SubAnswer is one line of a sub-prompt reply: the sub (empty when the model
+// answered "?" or a slug the taxonomy folds to nothing) and its confidence.
+type SubAnswer struct {
+	Sub        string
+	Confidence float64
+}
+
+// ParseBatchSubs parses the sub-prompt reply; the answer on line n belongs
+// to ids[n-1]. STRICT like ParseBatchVerdicts. Two decidable rewrites, both
+// observed shapes of "the model answered more than asked": a sub prefixed
+// with the batch's OWN area is stripped (the area was fixed, repeating it
+// adds nothing), while any other "x/y" is an error — a different area is a
+// different answer, and rewriting it would be a guess. The final sub goes
+// through NormalizeTopic, so empty-sub words ("other", "misc") and length
+// caps apply exactly as they do on the full path.
+func ParseBatchSubs(cfg *rules.Config, area string, ids []string, reply string) (map[string]SubAnswer, error) {
+	out := make(map[string]SubAnswer, len(ids))
+	seen := make(map[int]bool, len(ids))
+	for _, line := range strings.Split(reply, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			continue // prose, fences, blank lines — completeness is checked below
+		}
+		m := lineNumberRe.FindStringSubmatch(fields[0])
+		if m == nil {
+			continue
+		}
+		n, _ := strconv.Atoi(m[1])
+		rawSub, confStr := fields[1], fields[2]
+		conf, confErr := strconv.ParseFloat(confStr, 64)
+		if n < 1 || n > len(ids) {
+			if confErr == nil {
+				return nil, fmt.Errorf("sub for line %d of %d", n, len(ids))
+			}
+			continue
+		}
+		if seen[n] {
+			return nil, fmt.Errorf("duplicate sub for line %d", n)
+		}
+		seen[n] = true
+		if confErr != nil || conf < 0 || conf > 1 {
+			return nil, fmt.Errorf("line %d: bad confidence %q", n, confStr)
+		}
+		if slash := strings.Index(rawSub, "/"); slash >= 0 {
+			if rawSub[:slash] != area {
+				return nil, fmt.Errorf("line %d: %q names an area other than the fixed %q", n, rawSub, area)
+			}
+			rawSub = rawSub[slash+1:]
+		}
+		if rawSub == "?" {
+			out[ids[n-1]] = SubAnswer{Confidence: conf}
+			continue
+		}
+		topic, ok := cfg.NormalizeTopic(area + "/" + rawSub)
+		if !ok {
+			return nil, fmt.Errorf("line %d: %q is not a usable sub", n, rawSub)
+		}
+		_, sub := rules.SplitTopic(topic)
+		out[ids[n-1]] = SubAnswer{Sub: sub, Confidence: conf}
+	}
+	if len(out) != len(ids) {
+		for n := 1; n <= len(ids); n++ {
+			if !seen[n] {
+				return nil, fmt.Errorf("reply misses %d of %d subs (first missing: line %d)", len(ids)-len(out), len(ids), n)
+			}
+		}
+	}
+	return out, nil
 }
 
 // normalizeFields maps the field layouts models actually produce onto the

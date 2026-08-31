@@ -3,6 +3,7 @@
 package classify
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -83,7 +84,7 @@ func TestCacheRoundtrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, ok := c.Read("abc123DEF45")
-	if !ok || got != want {
+	if !ok || !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v ok=%v", got, ok)
 	}
 	if err := c.Write("../evil", want); err == nil {
@@ -383,7 +384,7 @@ func TestCacheRoundtripBasis(t *testing.T) {
 	if got.Basis != BasisFull {
 		t.Errorf("Basis roundtrip: got %q, want %q", got.Basis, BasisFull)
 	}
-	if got != want {
+	if !reflect.DeepEqual(got, want) {
 		t.Errorf("full roundtrip: got %+v, want %+v", got, want)
 	}
 }

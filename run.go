@@ -74,6 +74,10 @@ func cmdRun(args []string) error {
 	}
 
 	baseOpts := lf.opts()
+	// Wave mode is not retry mode: a wave re-classifies whatever enrich just
+	// delivered, and mixing targeted re-asks into that would re-ask the same
+	// defects once per wave.
+	baseOpts.retry = ""
 	wave := 0
 	asked := 0
 	var prev passStats
