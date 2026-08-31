@@ -66,7 +66,17 @@ Usage:
                                   the names — for threshold calibration, not for a
                                   taxonomy you mean to keep),
                                   -probe (measure server latency, change nothing)
-  youtubehistii report            render data/out/report.csv + terminal summary; the same
+  youtubehistii abtest            would ANOTHER model on the server classify better? A
+                                  verdict's cache key carries the taxonomy fingerprint,
+                                  not the model, so switching models invalidates nothing
+                                  and silently mixes two judges into one corpus — the
+                                  consistent way out is re-asking ~28k videos, five hours.
+                                  This asks both models the byte-identical production
+                                  prompt on a deterministic sample and, with -judge, lets
+                                  a third model decide the disagreements. Writes nothing.
+                                  Flags: -model <candidate> (required), -baseline <model>,
+                                  -judge <model>, -n 200, -batch 20
+  youtubehistii report          render data/out/report.csv + terminal summary; the same
                                   numbers are a view of the watchpath page, at #/report
                                   (-taxonomy: project topics through config/taxonomy.yaml)
   youtubehistii watchpath         render data/out/watchpath.html: the same views along the
@@ -102,6 +112,8 @@ func main() {
 		err = cmdInspect(args)
 	case "taxonomy":
 		err = cmdTaxonomy(args)
+	case "abtest":
+		err = cmdABTest(args)
 	case "report":
 		err = cmdReport(args)
 	case "watchpath":

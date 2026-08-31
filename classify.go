@@ -519,18 +519,7 @@ func (r *pass) askLive(set liveSet) error {
 			fmt.Printf("asking %s (model %s)\n", client.BaseURL, client.Model)
 		}
 
-		// What the model gets to reuse: every sub already assigned, by rules
-		// and by cached verdicts alike. Computed once, before any round —
-		// seeds that shift mid-run would make the result depend on batch
-		// order.
-		topicsSoFar := make([]string, 0, len(r.verdicts)+len(r.cached))
-		for _, v := range r.verdicts {
-			topicsSoFar = append(topicsSoFar, v.topic)
-		}
-		for _, v := range r.cached {
-			topicsSoFar = append(topicsSoFar, v.Topic)
-		}
-		seeds := collectSubSeeds(r.cfg, topicsSoFar, r.retryTopics())
+		seeds := r.subSeeds()
 
 		if len(r.retryContext) > 0 {
 			r.fillChannelContext()
@@ -566,6 +555,24 @@ const minSubConfidence = 0.4
 // carries only that area's seeds (see BuildSubPrompt). The merge touches
 // Topic and Confidence only — Mode, Basis, Model and Taxonomy stay exactly
 // what the original verdict said, because this round did not re-judge them.
+// subSeeds is what the model gets to reuse: every sub already assigned, by
+// rules and by cached verdicts alike. Computed once, before any round — seeds
+// that shift mid-run would make the result depend on batch order.
+//
+// A method rather than eight lines inside askLive because "abtest" has to
+// build the SAME prompt the production pass builds; a second copy of this
+// would drift and quietly turn a model comparison into a prompt comparison.
+func (r *pass) subSeeds() map[string][]string {
+	topicsSoFar := make([]string, 0, len(r.verdicts)+len(r.cached))
+	for _, v := range r.verdicts {
+		topicsSoFar = append(topicsSoFar, v.topic)
+	}
+	for _, v := range r.cached {
+		topicsSoFar = append(topicsSoFar, v.Topic)
+	}
+	return collectSubSeeds(r.cfg, topicsSoFar, r.retryTopics())
+}
+
 func (r *pass) askSubs(client *omlx.Client, llmCache classify.Cache, ids []string, seeds map[string][]string) error {
 	if len(ids) == 0 || r.llmDown {
 		return nil
