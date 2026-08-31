@@ -19,10 +19,21 @@ import (
 	"fmt"
 	"os"
 	"time"
+	// Embedded, so LoadLocation below works on a runner image that ships no
+	// zone files at all. ~450 KB in a tool that only CI runs.
+	_ "time/tzdata"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
 	"github.com/bmmmm/youtubehistii/internal/report"
 )
+
+// fixtureZone pins the time zone the fixture renders in. The page buckets by
+// LOCAL day, so without this the same views produce a different day count per
+// machine — measured: 566 days here, 512 on the UTC runner, same input. A
+// zone WITH daylight saving is the deliberate choice over UTC: it keeps the
+// two shifted days a UTC runner would never produce, and those are exactly
+// the days the day axis is known to wobble on.
+const fixtureZone = "Europe/Berlin"
 
 // t0 is the fixture's first view. Fixed, in UTC, on a Monday: the page buckets
 // by local day and by month, and a moving start would move those buckets.
@@ -162,6 +173,13 @@ func build() []classify.Verdict {
 }
 
 func main() {
+	loc, err := time.LoadLocation(fixtureZone)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "pagefixture:", err)
+		os.Exit(1)
+	}
+	time.Local = loc
+
 	rows := build()
 	p := report.BuildPath(rows)
 
