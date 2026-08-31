@@ -14,30 +14,16 @@ import (
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
 
-// TestCmdRunEndsOnThePage is the guard on the one thing a full run is for.
-//
-// "run" used to end on a page, back when "report" wrote an HTML file of its
-// own. ca1703d moved the report INTO the watch-path app and deleted that
-// file; run.go was not part of that commit, so from then on a full run wrote
-// a CSV and a terminal summary and no page at all — and nothing said so.
-// A command that quietly stops producing its output is exactly what an
-// end-to-end test is for.
-//
-// The run stays offline: every video is already in the meta cache, so enrich
-// finds nothing missing and returns before it ever reaches for the network,
-// and -no-llm keeps the classifier on its rules.
-func TestCmdRunEndsOnThePage(t *testing.T) {
-	// loadRules and the taxonomy resolve relative to the working directory.
-	t.Chdir(t.TempDir())
-	dataDir := t.TempDir()
-	p := paths{dataDir: dataDir}
-
-	rulesPath := filepath.Join(dataDir, "rules.yaml")
-	// No base_url that resolves: -no-llm must mean no server is contacted,
-	// and a rules file pointing nowhere is the sharpest way to say so.
+// writeRunFixture lays out a data directory a full run can process WITHOUT a
+// network: every video is already in the meta cache, so enrich finds nothing
+// missing and returns before it reaches for yt-dlp. The rules file points at
+// a host that does not resolve, so "-no-llm" meaning "no server is contacted"
+// is not a claim but a property of the fixture.
+func writeRunFixture(t *testing.T, p paths) {
+	t.Helper()
 	rules := "llm:\n  model: test-chat\n  base_url: http://offline.invalid/v1\n" +
 		"topics:\n  - id: music\n    desc: music\n  - id: unclear\n    desc: cannot tell\n"
-	if err := os.WriteFile(rulesPath, []byte(rules), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(p.dataDir, "rules.yaml"), []byte(rules), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -53,8 +39,6 @@ func TestCmdRunEndsOnThePage(t *testing.T) {
 			Channel:   fmt.Sprintf("run channel %d", i%3),
 			WatchedAt: t0.Add(time.Duration(i)*7*time.Minute).AddDate(0, 0, i/4),
 		})
-		// Cached metadata for every one of them — this is what keeps enrich
-		// from going out to the network.
 		if err := cache.Write(enrich.Meta{
 			ID: id, Title: fmt.Sprintf("run fixture %d", i),
 			Channel: fmt.Sprintf("run channel %d", i%3), Duration: 300,
@@ -66,8 +50,24 @@ func TestCmdRunEndsOnThePage(t *testing.T) {
 	if err := writeJSONL(p.historyJSONL(), views); err != nil {
 		t.Fatal(err)
 	}
+}
 
-	if err := cmdRun([]string{"-data", dataDir, "-rules", rulesPath, "-no-llm"}); err != nil {
+// TestCmdRunEndsOnThePage is the guard on the one thing a full run is for.
+//
+// "run" used to end on a page, back when "report" wrote an HTML file of its
+// own. ca1703d moved the report INTO the watch-path app and deleted that
+// file; run.go was not part of that commit, so from then on a full run wrote
+// a CSV and a terminal summary and no page at all — and nothing said so.
+// A command that quietly stops producing its output is exactly what an
+// end-to-end test is for.
+func TestCmdRunEndsOnThePage(t *testing.T) {
+	// loadRules and the taxonomy resolve relative to the working directory.
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+
+	if err := cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"), "-no-llm"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -88,5 +88,32 @@ func TestCmdRunEndsOnThePage(t *testing.T) {
 		if !strings.Contains(strings.ToLower(string(page)), strings.ToLower(want)) {
 			t.Errorf("the page a full run wrote misses %q (%d bytes)", want, len(page))
 		}
+	}
+}
+
+// TestCmdRunChecksTheTaxonomyFirst: -taxonomy is not read until the report
+// and the page, at the very end of a run that takes hours. A missing
+// config/taxonomy.yaml there would throw all of that away, with a message
+// that was available before the first video was fetched.
+//
+// The test proves the check comes FIRST, not merely that it exists: without
+// the preflight this run (offline, everything cached) gets all the way
+// through classification and leaves a classified.jsonl behind before it
+// fails. So the assertion is on the absence of that file.
+func TestCmdRunChecksTheTaxonomyFirst(t *testing.T) {
+	t.Chdir(t.TempDir()) // no config/taxonomy.yaml in here
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+
+	err := cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"), "-no-llm", "-taxonomy"})
+	if err == nil {
+		t.Fatal("a run with -taxonomy and no taxonomy file returned no error")
+	}
+	if !strings.Contains(err.Error(), taxonomyPath) {
+		t.Errorf("the error does not name the missing file: %v", err)
+	}
+	if _, statErr := os.Stat(p.classifiedJSONL()); statErr == nil {
+		t.Error("the run classified everything before noticing the missing taxonomy")
 	}
 }

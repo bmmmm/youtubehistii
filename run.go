@@ -29,6 +29,17 @@ func cmdRun(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Same idea as loadRules above, for the flag that is read LAST. -taxonomy
+	// only takes effect in the report and the page, hours after the run
+	// starts, so a missing config/taxonomy.yaml would throw away a full
+	// enrich and classification with a message the reader could have had in
+	// the first second. Folding an empty slice loads the file and touches
+	// nothing.
+	if *wf.useTaxonomy {
+		if err := foldThroughTaxonomy(nil); err != nil {
+			return err
+		}
+	}
 	views, err := readJSONL[takeout.View](p.historyJSONL())
 	if err != nil {
 		return fmt.Errorf("read history (run \"import\" first): %w", err)
