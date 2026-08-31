@@ -151,3 +151,41 @@ func TestRenderTextNoNamesOmitsEveryName(t *testing.T) {
 		}
 	}
 }
+
+// TestGoneByCountsReasons: the unavailable views are the one block the report
+// can say nothing topical about, so the fate is all it has. Splitting it is
+// the difference between "19 % unclear" and knowing that most of it was made
+// private by the uploader.
+func TestGoneByCountsReasons(t *testing.T) {
+	now := time.Now()
+	rows := []classify.Verdict{
+		{VideoID: "a", Topic: "unclear", Source: "llm:m", WatchedAt: now, Unavailable: true, GoneReason: "private"},
+		{VideoID: "b", Topic: "unclear", Source: "llm:m", WatchedAt: now, Unavailable: true, GoneReason: "private"},
+		{VideoID: "c", Topic: "unclear", Source: "llm:m", WatchedAt: now, Unavailable: true, GoneReason: "age"},
+		// A tombstone from before the reason existed must still be counted,
+		// under "unknown" rather than silently dropped.
+		{VideoID: "d", Topic: "unclear", Source: "llm:m", WatchedAt: now, Unavailable: true},
+		{VideoID: "e", Topic: "music", Source: "llm:m", WatchedAt: now},
+	}
+	st := Aggregate(rows, nil)
+	if st.Unavailable != 4 {
+		t.Errorf("Unavailable = %d, want 4", st.Unavailable)
+	}
+	for reason, want := range map[string]int{"private": 2, "age": 1, "unknown": 1} {
+		if st.GoneBy[reason] != want {
+			t.Errorf("GoneBy[%q] = %d, want %d", reason, st.GoneBy[reason], want)
+		}
+	}
+	// A view that still exists must not appear as a fate at all.
+	if total := st.GoneBy["private"] + st.GoneBy["age"] + st.GoneBy["unknown"]; total != st.Unavailable {
+		t.Errorf("reasons sum to %d, want %d — a live view leaked in", total, st.Unavailable)
+	}
+
+	out := RenderText(st, false)
+	if !strings.Contains(out, "made private 2") {
+		t.Errorf("render lost the reason split:\n%s", out)
+	}
+	if !strings.Contains(out, "1 of those are locked") {
+		t.Errorf("render lost the locked hint:\n%s", out)
+	}
+}

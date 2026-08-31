@@ -64,7 +64,12 @@ type Stats struct {
 	From, To     time.Time
 	NoID         int
 	Unavailable  int
-	Sources      map[string]int // rule | llm | category | unclassified
+	// GoneBy splits the unavailable views by what actually happened to them.
+	// A topic they cannot have; a fate they can — and the two halves differ:
+	// "private" and "removed" are gone for everyone, "age" and "members" are
+	// only gone for a viewer without the credential.
+	GoneBy  map[string]int
+	Sources map[string]int // rule | llm | category | unclassified
 
 	Topics   []TopicAgg
 	Months   []MonthAgg
@@ -128,6 +133,14 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 		}
 		if r.Unavailable {
 			st.Unavailable++
+			reason := r.GoneReason
+			if reason == "" {
+				reason = "unknown"
+			}
+			if st.GoneBy == nil {
+				st.GoneBy = map[string]int{}
+			}
+			st.GoneBy[reason]++
 		}
 		switch {
 		case strings.HasPrefix(r.Source, "rule:"):

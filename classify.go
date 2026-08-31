@@ -479,6 +479,7 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		if m, ok := metas[v.VideoID]; ok {
 			row.DurationS = m.Duration
 			row.Unavailable = m.Unavailable
+			row.GoneReason = m.GoneReason
 			if m.Title != "" {
 				row.Title = m.Title
 			}

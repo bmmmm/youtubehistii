@@ -14,8 +14,12 @@ func RenderText(st *Stats, showNames bool) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "%d views, %d unique videos, ≤ %.0f h (upper bound), %s … %s\n",
 		st.Views, st.UniqueVideos, st.HoursUpper, fmtDate(st.From), fmtDate(st.To))
-	fmt.Fprintf(&b, "classified: %d via rules, %d via llm, %d area-only from the youtube category, %d open\n\n",
+	fmt.Fprintf(&b, "classified: %d via rules, %d via llm, %d area-only from the youtube category, %d open\n",
 		st.Sources["rule"], st.Sources["llm"], st.Sources["category"], st.Sources["unclassified"])
+	if line := goneLine(st); line != "" {
+		b.WriteString(line)
+	}
+	b.WriteString("\n")
 
 	maxViews := 1
 	if len(st.Topics) > 0 {
@@ -69,6 +73,48 @@ func RenderText(st *Stats, showNames bool) string {
 
 // subLine renders an area's free second level as one compact row; subs are
 // slugs, never channel names, so it stays safe under -no-names.
+// goneReasonOrder renders the fates worst-first: the ones nothing can undo,
+// then the ones a credential could, then the ones not yet asked about.
+var goneReasonOrder = []struct{ key, label string }{
+	{"private", "made private"},
+	{"removed", "removed by the uploader"},
+	{"terminated", "channel terminated"},
+	{"unavailable", "unavailable"},
+	{"age", "age-restricted"},
+	{"members", "members-only"},
+	{"unknown", "reason not recorded"},
+}
+
+// goneLine explains the unavailable views instead of leaving them as a silent
+// block of "unclear". These videos cannot have a topic — no metadata survives
+// them — but they do have a fate, and that is the honest thing to report.
+func goneLine(st *Stats) string {
+	if st.Unavailable == 0 || len(st.GoneBy) == 0 {
+		return ""
+	}
+	var parts []string
+	locked := 0
+	for _, r := range goneReasonOrder {
+		n := st.GoneBy[r.key]
+		if n == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s %d", r.label, n))
+		if r.key == "age" || r.key == "members" {
+			locked += n
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	out := fmt.Sprintf("gone (%d views, %.0f%% — no metadata survives them, so no topic): %s\n",
+		st.Unavailable, pctI(st.Unavailable, st.Views), strings.Join(parts, " · "))
+	if locked > 0 {
+		out += fmt.Sprintf("  %d of those are locked rather than deleted — an account with access could still fetch them\n", locked)
+	}
+	return out
+}
+
 func subLine(subs []SubAgg, limit int) string {
 	if len(subs) == 0 {
 		return ""

@@ -32,6 +32,12 @@ type Verdict struct {
 	Confidence  float64   `json:"confidence,omitempty"`
 	DurationS   int       `json:"durationS,omitempty"`
 	Unavailable bool      `json:"unavailable,omitempty"`
+	// GoneReason carries enrich's tombstone reason through to the report, so
+	// a view that cannot have a topic can at least say what happened to it:
+	// "private", "removed", "age", "members", "terminated", "unavailable".
+	// Empty on everything that still exists, and on tombstones written before
+	// the reason was recorded.
+	GoneReason string `json:"goneReason,omitempty"`
 }
 
 // Item is one video as the LLM sees it: the matcher input plus the area its
