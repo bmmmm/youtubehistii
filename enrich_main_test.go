@@ -287,3 +287,37 @@ func TestParseRejectsHTMLExport(t *testing.T) {
 		t.Errorf("err = %v, want HTML-export hint", err)
 	}
 }
+
+// TestMatchesGoneReason pins what -retry-gone selects. The distinction it
+// encodes is the reason the flag exists: "locked" must catch exactly the two
+// reasons a credential can lift, and must NOT catch a deleted video — a spec
+// that re-asks all 3554 tombstones instead of the ~handful worth re-asking is
+// the failure mode this guards against.
+func TestMatchesGoneReason(t *testing.T) {
+	cases := []struct {
+		spec, reason string
+		want         bool
+	}{
+		{"locked", "age", true},
+		{"locked", "members", true},
+		{"locked", "removed", false},
+		{"locked", "private", false},
+		{"locked", "", false},
+		{"unknown", "", true},
+		{"unknown", "age", false},
+		{"all", "removed", true},
+		{"all", "", true},
+		{"age", "age", true},
+		{"age", "members", false},
+		{"age,members", "members", true},
+		{"age, members", "members", true}, // spaces after the comma
+		{"", "age", false},
+		{"locked,unknown", "", true},
+		{"locked,unknown", "removed", false},
+	}
+	for _, c := range cases {
+		if got := matchesGoneReason(c.spec, c.reason); got != c.want {
+			t.Errorf("matchesGoneReason(%q, %q) = %v, want %v", c.spec, c.reason, got, c.want)
+		}
+	}
+}

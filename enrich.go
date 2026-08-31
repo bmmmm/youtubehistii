@@ -21,6 +21,7 @@ type enrichFlags struct {
 	limit, chunk, workers *int
 	sleep                 *float64
 	cookies               *string
+	retryGone             *string
 }
 
 func addEnrichFlags(fs *flag.FlagSet) enrichFlags {
@@ -43,13 +44,20 @@ func addEnrichFlags(fs *flag.FlagSet) enrichFlags {
 		// one directly (the full BROWSER[+KEYRING][:PROFILE] syntax works).
 		cookies: fs.String("cookies-from-browser", "",
 			`take YouTube cookies from a browser ("auto" picks the first installed); off by default`),
+		// A tombstone normally means "never ask again", which is the whole
+		// point of writing one. But two of the reasons are only permanent
+		// for a caller without the credential, so a run WITH one needs a way
+		// to reconsider exactly those — otherwise the tombstone that says
+		// "locked" is as final as the one that says "deleted".
+		retryGone: fs.String("retry-gone", "",
+			`re-ask tombstoned videos: "locked" (age+members), "unknown" (written before reasons existed), "all", or a comma-separated list of reasons`),
 	}
 }
 
 func (ef enrichFlags) opts() enrichOpts {
 	return enrichOpts{
 		limit: *ef.limit, chunk: *ef.chunk, workers: *ef.workers,
-		sleep: *ef.sleep, cookies: *ef.cookies,
+		sleep: *ef.sleep, cookies: *ef.cookies, retryGone: *ef.retryGone,
 	}
 }
 
@@ -94,6 +102,7 @@ type enrichOpts struct {
 	limit, chunk, workers int
 	sleep                 float64
 	cookies               string          // -cookies-from-browser, see resolveCookieSource
+	retryGone             string          // -retry-gone, see matchesGoneReason
 	stop                  <-chan struct{} // optional: stop feeding new chunks (in-flight ones finish)
 
 	// fetch replaces the yt-dlp call. nil means enrich.FetchChunk; tests set
@@ -218,6 +227,37 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 	if err != nil {
 		return fmt.Errorf("read meta cache: %w", err)
 	}
+	// -retry-gone lifts selected tombstones out of the cached set, so the
+	// normal "what is missing" path picks them up again. Reading the whole
+	// cache costs a directory of small files, so it only happens when the
+	// flag is actually set.
+	retrying := map[string]bool{}
+	if opts.retryGone != "" {
+		metas, rerr := cache.ReadAll()
+		if rerr != nil {
+			return fmt.Errorf("read meta cache for -retry-gone: %w", rerr)
+		}
+		byReason := map[string]int{}
+		for id, m := range metas {
+			if !m.Unavailable || !matchesGoneReason(opts.retryGone, m.GoneReason) {
+				continue
+			}
+			delete(cached, id)
+			retrying[id] = true
+			r := m.GoneReason
+			if r == "" {
+				r = "unknown"
+			}
+			byReason[r]++
+		}
+		if len(retrying) == 0 {
+			fmt.Printf("-retry-gone %q matched no tombstone\n", opts.retryGone)
+		} else {
+			fmt.Printf("-retry-gone %q: reconsidering %d tombstones (%s)\n",
+				opts.retryGone, len(retrying), formatCounts(byReason))
+		}
+	}
+
 	missing, uniqueTotal := missingByPriority(views, cached)
 	fmt.Printf("%d unique videos, %d cached, %d to fetch\n", uniqueTotal, uniqueTotal-len(missing), len(missing))
 	if opts.limit > 0 && len(missing) > opts.limit {
@@ -280,7 +320,9 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 				// missing list was built — skip them, fetch only the rest.
 				ids := make([]string, 0, len(all))
 				for _, id := range all {
-					if !cache.Has(id) {
+					// A retry candidate IS cached — that is the point — so
+					// the freshness check must not filter it back out.
+					if !cache.Has(id) || retrying[id] {
 						ids = append(ids, id)
 					}
 				}
@@ -376,27 +418,10 @@ feed:
 	fmt.Printf("done: %d fetched, %d gone for good (tombstoned, kept in the report), %d failed\n",
 		t.fetched, t.tombstoned, t.failed)
 	if len(t.goneBy) > 0 {
-		reasons := make([]string, 0, len(t.goneBy))
-		for r := range t.goneBy {
-			reasons = append(reasons, r)
-		}
-		sort.Slice(reasons, func(i, j int) bool {
-			if t.goneBy[reasons[i]] != t.goneBy[reasons[j]] {
-				return t.goneBy[reasons[i]] > t.goneBy[reasons[j]]
-			}
-			return reasons[i] < reasons[j]
-		})
-		parts := make([]string, 0, len(reasons))
-		locked := 0
-		for _, r := range reasons {
-			parts = append(parts, fmt.Sprintf("%s %d", r, t.goneBy[r]))
-			if r == "age" || r == "members" {
-				locked += t.goneBy[r]
-			}
-		}
-		fmt.Printf("  gone by reason: %s\n", strings.Join(parts, " · "))
+		fmt.Printf("  gone by reason: %s\n", formatCounts(t.goneBy))
+		locked := t.goneBy["age"] + t.goneBy["members"]
 		if locked > 0 {
-			fmt.Printf("  %d of those are locked, not dead — retry with \"-cookies-from-browser\" and the right account\n", locked)
+			fmt.Printf("  %d of those are locked, not dead — retry with \"-cookies-from-browser\" and an account that has access\n", locked)
 		}
 	}
 	if t.failed > 0 {
@@ -406,6 +431,53 @@ feed:
 		}
 	}
 	return nil
+}
+
+// matchesGoneReason reports whether a tombstone's reason is covered by a
+// -retry-gone spec. "locked" is the one worth naming: age and members are the
+// only reasons a credential can actually lift, so it is the difference
+// between re-asking 200 videos and re-asking 3554.
+func matchesGoneReason(spec, reason string) bool {
+	for _, want := range strings.Split(spec, ",") {
+		switch strings.TrimSpace(want) {
+		case "":
+			continue
+		case "all":
+			return true
+		case "locked":
+			if reason == "age" || reason == "members" {
+				return true
+			}
+		case "unknown":
+			if reason == "" {
+				return true
+			}
+		default:
+			if strings.TrimSpace(want) == reason {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// formatCounts renders a count map as "age 12 · members 3", biggest first.
+func formatCounts(m map[string]int) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]] != m[keys[j]] {
+			return m[keys[i]] > m[keys[j]]
+		}
+		return keys[i] < keys[j]
+	})
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", k, m[k]))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // missingByPriority returns uncached video IDs, most-watched first — so a
