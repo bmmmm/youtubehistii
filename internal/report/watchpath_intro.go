@@ -161,6 +161,47 @@ function miniList() {
   return s;
 }
 
+// The drift in miniature: the topic mix of the FIRST video of a sitting
+// against the mix from the seventh on, as two stacked bars. Two columns are
+// enough to show that they differ, which is the card's whole claim.
+function miniDrift() {
+  const s = mini("what you start with, and what you end up on");
+  const A = D.areas.length;
+  const early = new Array(A).fill(0), late = new Array(A).fill(0);
+  for (let si = 0; si < D.sess.length; si++) {
+    const vs = sessionViews(si);
+    let pos = 0;
+    for (let i = vs.length - 1; i >= 0; i--) {
+      if (isOverlap(vs[i])) continue;
+      pos++;
+      const into = pos === 1 ? early : pos >= 7 ? late : null;
+      if (into) into[vs[i][R_AREA]]++;
+    }
+  }
+  const col = (counts, x, w) => {
+    const total = counts.reduce((a, b) => a + b, 0);
+    if (!total) return;
+    const order = counts.map((v, ai) => [v, ai]).filter(([v]) => v > 0).sort((a, b) => b[0] - a[0]);
+    let y = 8;
+    for (const [v, ai] of order) {
+      const h = (v / total) * (MH - 18);
+      g.appendChild(svg("rect", { x: x, y: y, width: w, height: h, fill: areaColor(ai) }));
+      y += h;
+    }
+  };
+  const g = svg("g", { class: "rise" });
+  col(early, 22, 44);
+  col(late, 94, 44);
+  s.appendChild(g);
+  const l1 = svg("text", { x: 44, y: MH - 2, "text-anchor": "middle", "font-size": 8, class: "m" });
+  l1.textContent = "1st";
+  const l2 = svg("text", { x: 116, y: MH - 2, "text-anchor": "middle", "font-size": 8, class: "m" });
+  l2.textContent = "7th+";
+  s.appendChild(l1);
+  s.appendChild(l2);
+  return s;
+}
+
 // The rabbit holes as a depth histogram: how many runs were 4 videos long, 5,
 // 6, and how far the tail reaches. The card's promise is a RANKING, so the
 // miniature shows the distribution the ranking sorts — not one example chain,
@@ -276,6 +317,12 @@ function introCards(st) {
       st.longestSessN + " of them.",
       miniSitting(st.longestSess)));
   }
+  // The reverse reading. Placed after the zoom cards because it only makes
+  // sense once you have seen what it is reading backwards.
+  ways.appendChild(card("#/algo", "the algorithm, backwards",
+    "What held you and what you clicked away, how the topics drift from the " +
+    "first video of a sitting to the seventh, and the introductions that stuck.",
+    miniDrift()));
   // Only with chains on the payload: a card leading to "there is none" would
   // be worse than no card.
   if ((D.chains || []).length) {

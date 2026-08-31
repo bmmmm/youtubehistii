@@ -18,7 +18,7 @@ package report
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
 var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
-	overviewJS + detailJS + clusterJS + reportJS + rankJS + rankDaysJS + introJS + pageTail
+	overviewJS + detailJS + clusterJS + reportJS + rankJS + rankDaysJS + algoJS + introJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -281,6 +281,16 @@ g.chain:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px; }
    the row it explains rather than beside it, so the columns above stay a
    table. */
 .rwhy { margin: -.15rem 0 .45rem .4rem; font-size: .76rem; color: var(--muted); }
+/* Small multiples: one sparkline per area, each against its OWN peak. A
+   shared scale would flatten every small area into a flat line, and the
+   question these ask is the shape over time, not the size. */
+.smalls { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+          gap: .6rem; margin: .6rem 0; }
+.small { background: var(--card); border-radius: .4rem; padding: .45rem .55rem; }
+.small .sk { display: flex; align-items: center; gap: .35rem; font-size: .78rem;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.small .sk .dot { width: .5rem; height: .5rem; border-radius: 50%; flex-shrink: 0; }
+.small .sn { font-size: .68rem; color: var(--muted); }
 /* The report's month columns are hit by an invisible zone drawn OVER the
    stacked bars, so the shared opacity fade has nothing to fade. It tints
    instead — faint enough that the bars keep their colours through it, which
@@ -933,6 +943,12 @@ function route() {
     scrollTo(0, 0);
     if (!D.chains || !D.chains.length) { notFound(viewEl, "a rabbit hole"); return; }
     teardown = renderHoles(viewEl, sortId, area) || null;
+    return;
+  }
+  if (parts[0] === "algo") {
+    crumbs([{ text: "overview", hash: "/" }, { text: "the algorithm" }]);
+    scrollTo(0, 0);
+    teardown = renderAlgo(viewEl) || null;
     return;
   }
   if (parts[0] === "days") {

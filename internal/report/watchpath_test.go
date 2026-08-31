@@ -1531,3 +1531,152 @@ func TestPeakIsTheStrongestPercentile(t *testing.T) {
 		}
 	}
 }
+
+// TestPayloadCarriesTheRetentionWalk: the #/algo view derives retention per
+// area from the payload's edge column. Go computes the same thing straight
+// from the path here — if the two ever disagree, one of them is reading the
+// timeline wrong, and only this test would notice.
+func TestPayloadCarriesTheRetentionWalk(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p, nil)
+
+	type ret struct{ through, most, skipped, main int }
+	fromPath := map[string]*ret{}
+	for _, s := range p.Sessions {
+		for _, v := range s.Views {
+			if v.Overlap {
+				continue // background answers no question about retention
+			}
+			r := fromPath[v.Area]
+			if r == nil {
+				r = &ret{}
+				fromPath[v.Area] = r
+			}
+			r.main++
+			switch v.Edge {
+			case EdgeThrough:
+				r.through++
+			case EdgeMost:
+				r.most++
+			case EdgeSkipped:
+				r.skipped++
+			}
+		}
+	}
+
+	fromPayload := map[string]*ret{}
+	for _, row := range d.Rows {
+		if row[0] != rowView || row[9].(int)&1 != 0 {
+			continue
+		}
+		area := d.Areas[row[3].(int)]
+		r := fromPayload[area]
+		if r == nil {
+			r = &ret{}
+			fromPayload[area] = r
+		}
+		r.main++
+		switch d.Edges[row[7].(int)] {
+		case EdgeThrough:
+			r.through++
+		case EdgeMost:
+			r.most++
+		case EdgeSkipped:
+			r.skipped++
+		}
+	}
+	if !reflect.DeepEqual(fromPath, fromPayload) {
+		t.Errorf("retention from the path = %v,\nfrom the payload = %v", fromPath, fromPayload)
+	}
+}
+
+// TestPayloadCarriesThePositionWalk pins the drift panel's input: the area
+// mix by position in a sitting, main lane only, counted the same on both
+// sides of the payload.
+func TestPayloadCarriesThePositionWalk(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p, nil)
+
+	// Go's side: sittings run newest first and views inside them too, so
+	// "position in the sitting" means walking both backwards.
+	fromPath := map[int]map[string]int{}
+	for si := len(p.Sessions) - 1; si >= 0; si-- {
+		vs := p.Sessions[si].Views
+		pos := 0
+		for i := len(vs) - 1; i >= 0; i-- {
+			if vs[i].Overlap {
+				continue
+			}
+			pos++
+			if fromPath[pos] == nil {
+				fromPath[pos] = map[string]int{}
+			}
+			fromPath[pos][vs[i].Area]++
+		}
+	}
+
+	fromPayload := map[int]map[string]int{}
+	for si := len(d.Sess) - 1; si >= 0; si-- {
+		s := d.Sess[si]
+		from := s[0].(int) + 1
+		n := s[3].(int)
+		pos := 0
+		for i := n - 1; i >= 0; i-- {
+			row := d.Rows[from+i]
+			if row[9].(int)&1 != 0 {
+				continue
+			}
+			pos++
+			if fromPayload[pos] == nil {
+				fromPayload[pos] = map[string]int{}
+			}
+			fromPayload[pos][d.Areas[row[3].(int)]]++
+		}
+	}
+	if !reflect.DeepEqual(fromPath, fromPayload) {
+		t.Errorf("positions from the path = %v,\nfrom the payload = %v", fromPath, fromPayload)
+	}
+}
+
+// TestPayloadCarriesTheFirstContactWalk cross-checks the takeovers panel
+// against DayAgg.NewChans — two counts of the same fact, derived by
+// different code. They have to agree, or one of the two views is lying
+// about when a channel was met.
+func TestPayloadCarriesTheFirstContactWalk(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p, nil)
+
+	// The page's walk: sittings oldest first, every view, background too.
+	firstOn := map[string]int{} // channel -> day index
+	sessDay := map[int]int{}
+	for di, day := range p.Days {
+		for si := day.SessFrom; si <= day.SessTo; si++ {
+			sessDay[si] = di
+		}
+	}
+	for si := len(d.Sess) - 1; si >= 0; si-- {
+		s := d.Sess[si]
+		from := s[0].(int) + 1
+		n := s[3].(int)
+		for i := n - 1; i >= 0; i-- {
+			row := d.Rows[from+i]
+			ch := d.Chans[row[5].(int)]
+			if ch == "" {
+				continue
+			}
+			if _, seen := firstOn[ch]; !seen {
+				firstOn[ch] = sessDay[si]
+			}
+		}
+	}
+	perDay := make([]int, len(p.Days))
+	for _, di := range firstOn {
+		perDay[di]++
+	}
+	for di, day := range p.Days {
+		if day.NewChans != perDay[di] {
+			t.Errorf("day %s: DayAgg says %d new channels, the payload walk says %d",
+				day.Date, day.NewChans, perDay[di])
+		}
+	}
+}
