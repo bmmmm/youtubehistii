@@ -88,6 +88,13 @@ var goneReasonOrder = []struct{ key, label string }{
 // goneLine explains the unavailable views instead of leaving them as a silent
 // block of "unclear". These videos cannot have a topic — no metadata survives
 // them — but they do have a fate, and that is the honest thing to report.
+//
+// It states, it does not prompt. Videos disappearing is what a nine-year
+// watch history looks like, not a gap someone forgot to close: over half of
+// these were made private by their uploader, which no amount of work here
+// recovers. The locked/deleted split is part of the description because the
+// two are genuinely different states — not because the locked ones are a
+// backlog.
 func goneLine(st *Stats) string {
 	if st.Unavailable == 0 || len(st.GoneBy) == 0 {
 		return ""
@@ -110,7 +117,7 @@ func goneLine(st *Stats) string {
 	out := fmt.Sprintf("gone (%d views, %.0f%% — no metadata survives them, so no topic): %s\n",
 		st.Unavailable, pctI(st.Unavailable, st.Views), strings.Join(parts, " · "))
 	if locked > 0 {
-		out += fmt.Sprintf("  %d of those are locked rather than deleted — an account with access could still fetch them\n", locked)
+		out += fmt.Sprintf("  %d of those are locked rather than deleted (age-restricted or members-only)\n", locked)
 	}
 	return out
 }
