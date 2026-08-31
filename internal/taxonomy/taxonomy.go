@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bmmmm/youtubehistii/internal/counts"
 	"github.com/bmmmm/youtubehistii/internal/rules"
 )
 
@@ -68,20 +69,10 @@ func (l Label) EmbedText() string {
 	return strings.Join(parts, "\n")
 }
 
-// topKeys returns the n highest-counted keys, count desc with the name as
-// tie-break — the same determinism rule collectSubSeeds follows: anything
-// that feeds a prompt or a vector must not reshuffle between runs.
+// topKeys returns the n highest-counted keys in the shared deterministic
+// order (counts.Keys carries the why).
 func topKeys(m map[string]int, n int) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if m[keys[i]] != m[keys[j]] {
-			return m[keys[i]] > m[keys[j]]
-		}
-		return keys[i] < keys[j]
-	})
+	keys := counts.Keys(m)
 	return keys[:min(len(keys), n)]
 }
 

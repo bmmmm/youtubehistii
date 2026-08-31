@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bmmmm/youtubehistii/internal/counts"
 	"github.com/bmmmm/youtubehistii/internal/enrich"
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
@@ -463,16 +464,7 @@ func matchesGoneReason(spec, reason string) bool {
 
 // formatCounts renders a count map as "age 12 · members 3", biggest first.
 func formatCounts(m map[string]int) string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Slice(keys, func(i, j int) bool {
-		if m[keys[i]] != m[keys[j]] {
-			return m[keys[i]] > m[keys[j]]
-		}
-		return keys[i] < keys[j]
-	})
+	keys := counts.Keys(m)
 	parts := make([]string, 0, len(keys))
 	for _, k := range keys {
 		parts = append(parts, fmt.Sprintf("%s %d", k, m[k]))

@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/counts"
 	"github.com/bmmmm/youtubehistii/internal/enrich"
 	"github.com/bmmmm/youtubehistii/internal/omlx"
 	"github.com/bmmmm/youtubehistii/internal/rules"
@@ -555,7 +556,7 @@ const subSeedsPerArea = 12
 // reuses them one level down, which is how "dev" (an area back then) turned
 // up as a sub under music, education and science-technology alike.
 func collectSubSeeds(cfg *rules.Config, topics []string) map[string][]string {
-	counts := map[string]map[string]int{}
+	perArea := map[string]map[string]int{}
 	for _, t := range topics {
 		canonical, ok := cfg.NormalizeTopic(t)
 		if !ok {
@@ -565,23 +566,14 @@ func collectSubSeeds(cfg *rules.Config, topics []string) map[string][]string {
 		if sub == "" {
 			continue
 		}
-		if counts[area] == nil {
-			counts[area] = map[string]int{}
+		if perArea[area] == nil {
+			perArea[area] = map[string]int{}
 		}
-		counts[area][sub]++
+		perArea[area][sub]++
 	}
-	seeds := make(map[string][]string, len(counts))
-	for area, subs := range counts {
-		list := make([]string, 0, len(subs))
-		for sub := range subs {
-			list = append(list, sub)
-		}
-		sort.Slice(list, func(i, j int) bool {
-			if subs[list[i]] != subs[list[j]] {
-				return subs[list[i]] > subs[list[j]]
-			}
-			return list[i] < list[j]
-		})
+	seeds := make(map[string][]string, len(perArea))
+	for area, subs := range perArea {
+		list := counts.Keys(subs)
 		seeds[area] = list[:min(len(list), subSeedsPerArea)]
 	}
 	return seeds
