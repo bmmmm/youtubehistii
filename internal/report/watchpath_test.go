@@ -298,7 +298,10 @@ func TestRenderWatchPathIsSelfContained(t *testing.T) {
 	}
 	page := string(html)
 	for _, want := range []string{"prefers-color-scheme", "-apple-system", "watch path",
-		"Takeout logs when a video was STARTED", "overlap suspected"} {
+		"Takeout logs when a video was STARTED", "overlap suspected",
+		// The routes the views link to have to be in the shell the router
+		// reads, or a card would lead nowhere.
+		"#/holes", "/chain/"} {
 		if !strings.Contains(page, want) {
 			t.Errorf("page misses %q", want)
 		}
@@ -754,7 +757,7 @@ func TestPathStatsOnAKnownFixture(t *testing.T) {
 		Views: 10, Sessions: 3, Dropped: 1,
 		OverlapViews: 1, RabbitViews: 4,
 		LongestSession: 1, LongestSessionViews: 5, LongestSessionSpan: 24 * time.Minute,
-		DeepestRabbit: 1, DeepestRabbitLen: 4,
+		DeepestChain: 0, DeepestChainLen: 4,
 		BusiestDay: 0, BusiestDayViews: 7,
 	}
 	want.HoursUpper = st.HoursUpper // compared separately, it is a float sum
@@ -774,14 +777,20 @@ func TestPathStatsOnAKnownFixture(t *testing.T) {
 	if p.Days[st.BusiestDay].Date != "2026-07-01" {
 		t.Errorf("busiest day = %q, want 2026-07-01", p.Days[st.BusiestDay].Date)
 	}
+	// The deepest-chain index names a chain, and that chain has to be as
+	// deep as the number beside it says.
+	deepest := p.Chains[st.DeepestChain]
+	if deepest.Len != st.DeepestChainLen {
+		t.Errorf("deepest chain holds %d views, stats say %d", deepest.Len, st.DeepestChainLen)
+	}
 	rabbits := 0
-	for _, v := range p.Sessions[st.DeepestRabbit].Views {
+	for _, v := range p.Sessions[deepest.Session].Views {
 		if v.Rabbit {
 			rabbits++
 		}
 	}
-	if rabbits != st.DeepestRabbitLen {
-		t.Errorf("deepest sitting holds %d chain views, stats say %d", rabbits, st.DeepestRabbitLen)
+	if rabbits != st.DeepestChainLen {
+		t.Errorf("deepest sitting holds %d chain views, stats say %d", rabbits, st.DeepestChainLen)
 	}
 }
 
@@ -796,9 +805,9 @@ func TestEmptyPathHasNoIndices(t *testing.T) {
 			t.Errorf("%s: days = %v, trans = %v", name, p.Days, p.Trans)
 		}
 		st := p.Stats
-		if st.LongestSession != -1 || st.DeepestRabbit != -1 || st.BusiestDay != -1 {
+		if st.LongestSession != -1 || st.DeepestChain != -1 || st.BusiestDay != -1 {
 			t.Errorf("%s: indices = %d/%d/%d, want -1", name,
-				st.LongestSession, st.DeepestRabbit, st.BusiestDay)
+				st.LongestSession, st.DeepestChain, st.BusiestDay)
 		}
 		if st.Views != 0 || st.Sessions != 0 || st.HoursUpper != 0 || st.BusiestDayViews != 0 {
 			t.Errorf("%s: stats = %+v", name, st)
@@ -905,7 +914,7 @@ func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatal(err)
 	}
-	for _, k := range []string{"sess", "days", "trans", "areaViews", "stats"} {
+	for _, k := range []string{"sess", "days", "chains", "trans", "areaViews", "stats"} {
 		if _, ok := obj[k]; !ok {
 			t.Errorf("payload misses %q", k)
 		}
@@ -920,7 +929,7 @@ func TestPathDataAggregatesIndexTheLookupTables(t *testing.T) {
 	// (printed by the CLI, never by the page) rode along unread until 2026-08-25.
 	keys := []string{"views", "sessions", "overlapViews",
 		"hoursUpper", "longestSess", "longestSessN", "longestSessS",
-		"deepestRabbit", "deepestRabbitN", "busiestDay", "busiestDayN"}
+		"deepestChain", "busiestDay", "busiestDayN"}
 	for _, k := range keys {
 		if _, ok := stats[k]; !ok {
 			t.Errorf("stats misses %q", k)
@@ -1226,5 +1235,113 @@ func TestPathDataSerialisesTheClusterTree(t *testing.T) {
 	}
 	if len(back) != len(d.Clusters) {
 		t.Errorf("round trip gave %d areas, want %d", len(back), len(d.Clusters))
+	}
+}
+
+// TestChainsAreTheFlaggedRuns is the cross-check that keeps the chain
+// objects and the Rabbit flags from drifting apart: an INDEPENDENT walk
+// rebuilds the runs from the flags alone (same area, overlap views stepped
+// over, exactly as markRabbitHoles defines a run) and must land on the same
+// ranges the payload ships. If someone ever changes one side of that walk,
+// this is the test that says so.
+func TestChainsAreTheFlaggedRuns(t *testing.T) {
+	p := BuildPath(pathFixture())
+	var want []Chain
+	for si, s := range p.Sessions {
+		start := -1
+		for i := 0; i <= len(s.Views); i++ {
+			inRun := i < len(s.Views) && s.Views[i].Rabbit
+			switch {
+			case inRun && start < 0:
+				start = i
+			case !inRun && start >= 0:
+				// Views run newest first, so the run started at i-1.
+				end := i - 1
+				want = append(want, Chain{Session: si, First: start, Last: end})
+				start = -1
+			}
+		}
+	}
+	if len(want) != len(p.Chains) {
+		t.Fatalf("rebuilt %d chains from the flags, path has %d", len(want), len(p.Chains))
+	}
+	for i, c := range p.Chains {
+		if c.Session != want[i].Session || c.First != want[i].First || c.Last != want[i].Last {
+			t.Errorf("chain %d = sess %d [%d..%d], flags say sess %d [%d..%d]",
+				i, c.Session, c.First, c.Last, want[i].Session, want[i].First, want[i].Last)
+		}
+		if c.Len < rabbitMinLen {
+			t.Errorf("chain %d is %d views long, shorter than the rule's %d", i, c.Len, rabbitMinLen)
+		}
+		for _, v := range p.Sessions[c.Session].Views[c.First : c.Last+1] {
+			if !v.Overlap && v.Area != c.Area {
+				t.Errorf("chain %d claims area %q but holds a main-lane view of %q", i, c.Area, v.Area)
+			}
+		}
+	}
+}
+
+// TestChainOrdinalMatchesTheSessionOrder: a chain's position in the list is
+// what a reader counts from the top of the session view, which draws its
+// videos oldest first. Sittings run newest first, chains inside one oldest
+// first — that is what makes "#/session/<i>/chain/<k>" addressable.
+func TestChainOrdinalMatchesTheSessionOrder(t *testing.T) {
+	p := BuildPath(pathFixture())
+	prevSess := -1
+	prevFirst := 0
+	for i, c := range p.Chains {
+		if c.First > c.Last {
+			t.Fatalf("chain %d has First %d after Last %d", i, c.First, c.Last)
+		}
+		if c.Session < prevSess {
+			t.Errorf("chain %d sits in sitting %d, after %d — sittings must run newest first",
+				i, c.Session, prevSess)
+		}
+		// Inside one sitting: chronological means DESCENDING display index,
+		// because the views themselves run newest first.
+		if c.Session == prevSess && c.First >= prevFirst {
+			t.Errorf("chain %d starts at %d, not before the previous chain's %d", i, c.First, prevFirst)
+		}
+		prevSess, prevFirst = c.Session, c.First
+	}
+}
+
+// TestChainRowsPointAtTheirViews checks the payload's half of the promise:
+// rows[from…to] IS the chain — both ends are main-lane views of its area,
+// the main-lane count matches Len, and the range starts after the sitting's
+// own row rather than on it.
+func TestChainRowsPointAtTheirViews(t *testing.T) {
+	p := BuildPath(pathFixture())
+	d := buildPathData(p, nil)
+	if len(d.Chains) != len(p.Chains) {
+		t.Fatalf("payload has %d chains, path has %d", len(d.Chains), len(p.Chains))
+	}
+	for i, row := range d.Chains {
+		sess, from, to, length, area := row[0], row[1], row[2], row[3], row[4]
+		sessRow, ok := d.Sess[sess][0].(int)
+		if !ok {
+			t.Fatalf("chain %d: session row index is not an int", i)
+		}
+		if from <= sessRow {
+			t.Errorf("chain %d starts at row %d, on or before its sitting's row %d", i, from, sessRow)
+		}
+		if from > to {
+			t.Fatalf("chain %d: from %d after to %d", i, from, to)
+		}
+		main := 0
+		for r := from; r <= to; r++ {
+			if d.Rows[r][0] != rowView {
+				t.Fatalf("chain %d: row %d is not a view row", i, r)
+			}
+			if d.Rows[r][9].(int)&1 == 0 { // not overlap
+				main++
+				if d.Rows[r][3] != area {
+					t.Errorf("chain %d: main-lane row %d has area %v, chain says %v", i, r, d.Rows[r][3], area)
+				}
+			}
+		}
+		if main != length {
+			t.Errorf("chain %d: %d main-lane rows in [%d..%d], chain says %d", i, main, from, to, length)
+		}
 	}
 }

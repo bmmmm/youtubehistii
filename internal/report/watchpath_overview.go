@@ -95,11 +95,19 @@ function statTiles(st, days) {
       "#/session/" + ls)
     : tile("longest sitting", "—", ""));
 
-  const dr = st.deepestRabbit;
-  t.appendChild(dr >= 0
-    ? tile("deepest chain", st.deepestRabbitN + " videos",
-      "one area back to back · " + sessDate(dr), "#/session/" + dr)
-    : tile("deepest chain", "—", ""));
+  // The deepest chain names a CHAIN now, not just the sitting that held it,
+  // so the tile opens that exact run — and says how many others there are,
+  // because "deepest" only means something against the rest of them.
+  const dc = st.deepestChain;
+  if (dc >= 0) {
+    const c = D.chains[dc];
+    const k = chainsOf(c[C_SESS]).indexOf(dc);
+    t.appendChild(tile("deepest chain", c[C_LEN] + " videos",
+      sessDate(c[C_SESS]) + " · one of " + D.chains.length.toLocaleString() + " rabbit holes",
+      "#/session/" + c[C_SESS] + "/chain/" + k));
+  } else {
+    t.appendChild(tile("deepest chain", "—", ""));
+  }
 
   t.appendChild(tile("overlap suspected",
     n ? Math.round(100 * (st.overlapViews || 0) / n) + "%" : "—",

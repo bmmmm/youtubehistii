@@ -83,6 +83,7 @@ type Path struct {
 	Days     []DayAgg     // OLDEST first — calendar order
 	Trans    []Transition // by N desc, then From, then To — deterministic
 	Clusters []Cluster    // the topic tree, most-watched area first
+	Chains   []Chain      // sittings newest first, chains inside one OLDEST first
 	Stats    PathStats
 }
 
@@ -125,6 +126,23 @@ type DayAgg struct {
 	SessTo   int     // so Sessions[SessFrom] is the NEWEST sitting of that day
 }
 
+// Chain is one rabbit hole with an identity: the run of same-area main-lane
+// views markRabbitHoles flagged, as an object the page can rank, address and
+// link to. The flags stay — a card still needs to know it is inside one —
+// but "which chain, how deep, where did it start" is a question about the
+// run, and until it had a name nothing could ask it.
+//
+// First and Last index Session.Views in DISPLAY order (newest first), so
+// First is the chain's NEWEST video and First <= Last.
+type Chain struct {
+	Session     int // index into Path.Sessions
+	First, Last int // inclusive range in Sessions[Session].Views
+	Len         int // main-lane views in the run; overlap views inside it do not count
+	Area        string
+	Span        time.Duration // first start to last start
+	DurationS   int           // upper bound, the full length of every video in the run
+}
+
 // Transition counts one area following another on the main lane, inside one
 // sitting. Self-loops are kept: they are a chain staying on one topic.
 type Transition struct {
@@ -140,8 +158,8 @@ type PathStats struct {
 	LongestSession            int // index into Sessions, -1 when there is none
 	LongestSessionViews       int
 	LongestSessionSpan        time.Duration
-	DeepestRabbit             int // index into Sessions holding the longest chain, -1
-	DeepestRabbitLen          int // that chain's length in views
+	DeepestChain              int // index into Chains, -1 when there is none
+	DeepestChainLen           int // that chain's length in main-lane views
 	BusiestDay                int // index into Days, -1 when there is none
 	BusiestDayViews           int
 }
@@ -192,6 +210,9 @@ func BuildPath(rows []classify.Verdict) *Path {
 	// is not a statement about the video before it.
 	start := 0
 	var sessions []Session
+	// One entry per session, in build (chronological) order: the chain runs
+	// markRabbitHoles found, still as forward indices into that session.
+	var runsPerSession [][][2]int
 	for i := 1; i <= len(views); i++ {
 		gap := time.Duration(0)
 		if i < len(views) {
@@ -203,7 +224,7 @@ func BuildPath(rows []classify.Verdict) *Path {
 		block := views[start:i]
 		markEdges(block)
 		markOverlap(block)
-		markRabbitHoles(block)
+		runsPerSession = append(runsPerSession, markRabbitHoles(block))
 		s := Session{Start: block[0].WatchedAt, End: block[len(block)-1].WatchedAt, Views: block}
 		if len(sessions) > 0 {
 			s.GapBefore = block[0].WatchedAt.Sub(sessions[len(sessions)-1].End)
@@ -223,6 +244,30 @@ func BuildPath(rows []classify.Verdict) *Path {
 		}
 	}
 	p.Sessions = sessions
+	// The chains follow the same two reversals, in the same place, so the
+	// off-by-one lives here and nowhere else: a forward run [a..b] of a
+	// block of n views is [n-1-b .. n-1-a] once the block is newest-first,
+	// and session fi becomes len-1-fi. The runs of one session keep their
+	// build order, which is chronological — and chronological is the order
+	// the session view draws them in, so a chain's ordinal is what a reader
+	// counts from the top.
+	for si := range sessions {
+		fi := len(sessions) - 1 - si // the same sitting before the reversal
+		vs := sessions[si].Views
+		n := len(vs)
+		for _, run := range runsPerSession[fi] {
+			first, last := n-1-run[1], n-1-run[0]
+			c := Chain{Session: si, First: first, Last: last, Area: vs[first].Area}
+			for _, v := range vs[first : last+1] {
+				c.DurationS += v.DurationS
+				if !v.Overlap {
+					c.Len++
+				}
+			}
+			c.Span = vs[first].WatchedAt.Sub(vs[last].WatchedAt)
+			p.Chains = append(p.Chains, c)
+		}
+	}
 	p.Days = buildDays(sessions)
 	p.Trans = buildTransitions(sessions)
 	p.Clusters = buildClusters(sessions)
@@ -273,13 +318,21 @@ func markOverlap(vs []PathView) {
 // area with short gaps between them. Overlap views are skipped rather than
 // breaking the chain — background music does not end a chain of videos on
 // one subject, it just is not part of it.
-func markRabbitHoles(vs []PathView) {
+//
+// It RETURNS the runs it marked, as inclusive index pairs into vs, so the
+// chain objects and the per-view flags come out of one walk. Deriving the
+// chains again from the flags afterwards would be a second copy of this
+// rule, and the two would disagree exactly where it matters: two chains of
+// DIFFERENT areas that touch look like one long run to anything that only
+// reads Rabbit (which is what the old deepest-chain counter did).
+func markRabbitHoles(vs []PathView) [][2]int {
 	main := make([]int, 0, len(vs))
 	for i := range vs {
 		if !vs[i].Overlap {
 			main = append(main, i)
 		}
 	}
+	var runs [][2]int
 	runStart := 0
 	for k := 1; k <= len(main); k++ {
 		if k < len(main) {
@@ -292,9 +345,14 @@ func markRabbitHoles(vs []PathView) {
 			for _, idx := range main[runStart:k] {
 				vs[idx].Rabbit = true
 			}
+			// The bounds span the whole run INCLUDING the overlap views it
+			// stepped over: they sit between its videos on screen, so a
+			// bracket that skipped them would not close around what it names.
+			runs = append(runs, [2]int{main[runStart], main[k-1]})
 		}
 		runStart = k
 	}
+	return runs
 }
 
 // buildDays folds the sittings into calendar days, oldest first. Sessions
@@ -435,24 +493,17 @@ func buildClusters(sessions []Session) []Cluster {
 func buildStats(p *Path) PathStats {
 	st := PathStats{
 		Views: p.Views, Sessions: len(p.Sessions), Dropped: p.Dropped,
-		LongestSession: -1, DeepestRabbit: -1, BusiestDay: -1,
+		LongestSession: -1, DeepestChain: -1, BusiestDay: -1,
 	}
 	for si, s := range p.Sessions {
-		run := 0
 		for _, v := range s.Views {
 			st.HoursUpper += float64(v.DurationS) / 3600
 			if v.Overlap {
 				st.OverlapViews++
 				continue // set aside, so it neither counts nor cuts a chain
 			}
-			if !v.Rabbit {
-				run = 0
-				continue
-			}
-			st.RabbitViews++
-			run++
-			if run > st.DeepestRabbitLen {
-				st.DeepestRabbitLen, st.DeepestRabbit = run, si
+			if v.Rabbit {
+				st.RabbitViews++
 			}
 		}
 		// Strict >, so a tie keeps the newer sitting — Sessions is newest
@@ -460,6 +511,17 @@ func buildStats(p *Path) PathStats {
 		if n := len(s.Views); n > st.LongestSessionViews {
 			st.LongestSessionViews, st.LongestSession = n, si
 			st.LongestSessionSpan = s.End.Sub(s.Start)
+		}
+	}
+	// The deepest chain is an argmax over the chain objects, not a run
+	// counter walking the flags: a counter cannot see where one chain ends
+	// and the next begins, so two touching chains of different areas used to
+	// add up into a "deepest" run that no single chain ever was. Chains run
+	// newest sitting first, so strict > keeps the newer one on a tie — the
+	// same rule the sitting above follows.
+	for ci, c := range p.Chains {
+		if c.Len > st.DeepestChainLen {
+			st.DeepestChainLen, st.DeepestChain = c.Len, ci
 		}
 	}
 	// Days run oldest first, so >= is what keeps the newer day on a tie —

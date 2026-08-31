@@ -34,6 +34,51 @@ function fit(s, px, size) {
   return s.slice(0, lo) + "…";
 }
 
+// chainPanel is the focused chain read out loud: its facts, the way to its
+// neighbours inside the sitting, and the way out to the ranking. It sits
+// above the diagram because it names what the highlighted bracket below is.
+function chainPanel(si, chains, k) {
+  const ci = chains[k];
+  const f = chainFacts(ci);
+  const panel = $("div", "panel chainpanel");
+  panel.appendChild($("h2", null, chainName(ci)));
+  panel.appendChild($("p", "muted", chainLine(ci)));
+
+  const tiles = $("div", "tiles");
+  const tile = (kk, v) => {
+    const t = $("div", "tile");
+    t.appendChild($("div", "k", kk));
+    t.appendChild($("div", "v", v));
+    tiles.appendChild(t);
+  };
+  tile("videos", String(f.len));
+  if (f.span > 0) tile("span", dur(f.span));
+  if (f.durS > 0) tile("≤ watched", dur(f.durS));
+  tile(f.chans === 1 ? "channel" : "channels", String(f.chans));
+  // Only when something can be measured: a chain of videos with no known
+  // length has no retention, and a zero would read as "watched nothing".
+  if (f.edged > 0) tile("watched through", Math.round(100 * f.held / f.edged) + "%");
+  panel.appendChild(tiles);
+
+  const near = $("p", "near");
+  const step = (kk, text) => {
+    if (kk < 0 || kk >= chains.length) {
+      near.appendChild($("span", "muted", text));
+      return;
+    }
+    const a = $("a", null, text);
+    a.href = "#/session/" + si + "/chain/" + kk;
+    near.appendChild(a);
+  };
+  step(k - 1, "‹ earlier chain");
+  near.appendChild($("span", "sep", "·"));
+  near.appendChild($("span", "muted", "chain " + (k + 1) + " of " + chains.length + " in this sitting"));
+  near.appendChild($("span", "sep", "·"));
+  step(k + 1, "later chain ›");
+  panel.appendChild(near);
+  return panel;
+}
+
 // viewTip is shared so a bar on the day axis and a node in the sequence say
 // the same thing about the same video. A missing length is stated rather than
 // drawn over: the export does not know it, so neither do we.
@@ -227,13 +272,41 @@ function renderDay(root, di) {
 
 // ---- level 3: one sitting as a sequence ---------------------------------
 
-function renderSession(root, si) {
+function renderSession(root, si, focusK) {
   const sd = D.sess[si];
   const vs = sessionViews(si).slice().reverse();
 
   root.appendChild($("h2", null, stamp(sd[S_TS])));
   root.appendChild($("p", "muted", sessionLine(sd)));
+
+  // A sitting is not a dead end. D.sess runs newest first, so si+1 is the
+  // older neighbour and si-1 the newer — real anchors, so middle-click and
+  // "open in new tab" work.
+  const near = $("p", "near");
+  const step = (target, text) => {
+    if (target < 0 || target >= D.sess.length) {
+      near.appendChild($("span", "muted", text));
+      return;
+    }
+    const a = $("a", null, text);
+    a.href = "#/session/" + target;
+    near.appendChild(a);
+  };
+  step(si + 1, "‹ older sitting");
+  near.appendChild($("span", "sep", "·"));
+  const dayA = $("a", null, dayDate(D.days[sd[S_DAY]][DY_ED]));
+  dayA.href = "#/day/" + dayDate(D.days[sd[S_DAY]][DY_ED]);
+  near.appendChild(dayA);
+  near.appendChild($("span", "sep", "·"));
+  step(si - 1, "newer sitting ›");
+  root.appendChild(near);
+
   if (!vs.length) return;
+
+  const chains = chainsOf(si);
+  if (focusK >= 0 && focusK < chains.length) {
+    root.appendChild(chainPanel(si, chains, focusK));
+  }
 
   // The path runs top to bottom. Sideways would need a scrollbar at sixty
   // videos; downwards a sitting of any length simply scrolls like a page.
@@ -356,30 +429,47 @@ function renderSession(root, si) {
     prevMain = i;
   }
 
-  // Chains in the left gutter. A run ends where the area changes, which is
-  // where markRabbitHoles ended it too — two chains can sit back to back.
-  const main = [];
-  for (let i = 0; i < vs.length; i++) {
-    if (!pos[i].ov) main.push(i);
-  }
-  let k = 0;
-  while (k < main.length) {
-    if (!isRabbit(vs[main[k]])) { k++; continue; }
-    const area = vs[main[k]][R_AREA];
-    let j = k;
-    while (j + 1 < main.length && isRabbit(vs[main[j + 1]]) &&
-           vs[main[j + 1]][R_AREA] === area) j++;
-    const y1 = pos[main[k]].y, y2 = pos[main[j]].y + NH, mid = (y1 + y2) / 2;
-    const col = areaColor(area);
-    s.appendChild(svg("rect", { x: 26, y: y1, width: 5, height: y2 - y1, rx: 2.5, fill: col }));
+  // Chains in the left gutter. They are read off D.chains rather than
+  // re-derived from the flags: the runs are what markRabbitHoles marked, and
+  // one walk means the bracket and the ranking can never disagree about
+  // where a chain ends. Each one is a link to itself.
+  const base = sd[S_ROW] + 1; // rows of this sitting, newest first
+  let focusEl = null;
+  chainsOf(si).forEach((ci, k) => {
+    const c = D.chains[ci];
+    // Display order is newest first, the diagram runs oldest first — so the
+    // chain's LAST row is its top edge here.
+    const top = vs.length - 1 - (c[C_TO] - base);
+    const bot = vs.length - 1 - (c[C_FROM] - base);
+    if (!(top >= 0 && bot < vs.length)) return;
+    const y1 = pos[top].y, y2 = pos[bot].y + NH, mid = (y1 + y2) / 2;
+    const col = areaColor(c[C_AREA]);
+    const focused = k === focusK;
+    const g = svg("g", { class: "chain" + (focused ? " on" : "") });
+    g.appendChild(svg("rect", {
+      x: 26, y: y1, width: focused ? 8 : 5, height: y2 - y1, rx: 2.5, fill: col,
+    }));
+    // The chevron is the affordance: a cursor is invisible on a touchscreen
+    // and in a screenshot, so the bar has to say it leads somewhere before
+    // anyone touches it.
+    const chev = svg("text", { x: 30, y: y1 - 3, "text-anchor": "middle", "font-size": 11, fill: col });
+    chev.textContent = "›";
+    g.appendChild(chev);
     const t = svg("text", {
       x: 18, y: mid, "text-anchor": "middle", "font-size": 10, fill: col,
       transform: "rotate(-90 18 " + mid + ")",
     });
-    t.textContent = fit("chain of " + (j - k + 1) + " · " + areaName(area), y2 - y1 - 10, 10);
-    s.appendChild(t);
-    k = j + 1;
-  }
+    t.textContent = fit(chainName(ci), y2 - y1 - 10, 10);
+    g.appendChild(t);
+    // hit(), not clickTo(): a sitting has a handful of chains, not the
+    // hundreds of cells that made the calendar keep its shapes out of the
+    // tab order — so these can be reached and opened from the keyboard.
+    hit(g, "#/session/" + si + "/chain/" + k,
+      "open " + chainName(ci) + ", " + c[C_LEN] + " videos");
+    hover(g, () => chainTip(ci));
+    s.appendChild(g);
+    if (focused) focusEl = g;
+  });
 
   const chart = $("div", "chart");
   chart.appendChild(s);
@@ -402,6 +492,17 @@ function renderSession(root, si) {
   }
   cards.appendChild(stack);
   root.appendChild(cards);
+
+  // Bring the focused bracket into view, but only when it is actually off
+  // screen: a sitting of six videos needs no scroll, and moving the page
+  // when nothing was hidden is the kind of jump that loses a reader. No
+  // smooth behaviour — reduced motion is honoured everywhere on this page.
+  if (focusEl) {
+    const r = focusEl.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > innerHeight) {
+      scrollTo(0, Math.max(0, scrollY + r.top - innerHeight / 3));
+    }
+  }
 }
 </script>
 `

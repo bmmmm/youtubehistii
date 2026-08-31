@@ -45,6 +45,7 @@ type pathData struct {
 	// the data, every other view is a lens on it.
 	Sess      [][]any     `json:"sess"` // parallel to Path.Sessions, newest first
 	Days      [][]any     `json:"days"` // parallel to Path.Days, oldest first
+	Chains    [][]int     `json:"chains"`
 	Trans     [][]int     `json:"trans"`
 	AreaViews []int       `json:"areaViews"` // parallel to Areas: main-lane views per area
 	Clusters  [][]any     `json:"clusters"`  // area / subject / channel, most-watched first
@@ -75,17 +76,19 @@ func clusterNodes(cs []Cluster) [][]any {
 // so the count of dropped views stays at d.Dropped alone, and the chain total
 // stays in PathStats for the terminal to print.
 type statsData struct {
-	Views          int     `json:"views"`
-	Sessions       int     `json:"sessions"`
-	OverlapViews   int     `json:"overlapViews"`
-	HoursUpper     float64 `json:"hoursUpper"`
-	LongestSess    int     `json:"longestSess"`
-	LongestSessN   int     `json:"longestSessN"`
-	LongestSessS   int     `json:"longestSessS"`
-	DeepestRabbit  int     `json:"deepestRabbit"`
-	DeepestRabbitN int     `json:"deepestRabbitN"`
-	BusiestDay     int     `json:"busiestDay"`
-	BusiestDayN    int     `json:"busiestDayN"`
+	Views        int     `json:"views"`
+	Sessions     int     `json:"sessions"`
+	OverlapViews int     `json:"overlapViews"`
+	HoursUpper   float64 `json:"hoursUpper"`
+	LongestSess  int     `json:"longestSess"`
+	LongestSessN int     `json:"longestSessN"`
+	LongestSessS int     `json:"longestSessS"`
+	// One index where there used to be two numbers: the chain row carries
+	// its own length and sitting, so shipping them again would be two
+	// spellings of one fact.
+	DeepestChain int `json:"deepestChain"`
+	BusiestDay   int `json:"busiestDay"`
+	BusiestDayN  int `json:"busiestDayN"`
 }
 
 // reportData is the aggregate report as the report VIEW reads it — the same
@@ -267,8 +270,10 @@ func buildPathData(p *Path, st *Stats) *pathData {
 	}
 
 	d.Sess = make([][]any, 0, len(p.Sessions))
+	sessRow := make([]int, len(p.Sessions)) // where each sitting's block starts
 	for si, s := range p.Sessions {
 		rowIdx := len(d.Rows)
+		sessRow[si] = rowIdx
 		// A session row carries what the separator has to say: when it
 		// started, how long it ran, how many videos, and the silence before it.
 		d.Rows = append(d.Rows, []any{
@@ -311,6 +316,18 @@ func buildPathData(p *Path, st *Stats) *pathData {
 			})
 		}
 	}
+	// The chains ship as row RANGES, not as copies: everything else about a
+	// rabbit hole — its channels, the video it was entered from, the edge it
+	// ended on — is a walk over rows[from…to] the page can do in a
+	// millisecond, and a walk costs no bytes.
+	d.Chains = make([][]int, 0, len(p.Chains))
+	for _, c := range p.Chains {
+		base := sessRow[c.Session] + 1 // +1: the sitting's own row comes first
+		d.Chains = append(d.Chains, []int{
+			c.Session, base + c.First, base + c.Last, c.Len,
+			areas.get(c.Area), int(c.Span.Seconds()), c.DurationS,
+		})
+	}
 	// From here on nothing new may be interned: the area indices are already
 	// baked into the rows above, and the aggregates only look them up.
 	d.AreaViews = make([]int, len(areas.list))
@@ -339,17 +356,16 @@ func buildPathData(p *Path, st *Stats) *pathData {
 	// the page needs the plain name anyway to put it in a URL.
 	d.Clusters = clusterNodes(p.Clusters)
 	d.Stats = &statsData{
-		Views:          p.Stats.Views,
-		Sessions:       p.Stats.Sessions,
-		OverlapViews:   p.Stats.OverlapViews,
-		HoursUpper:     p.Stats.HoursUpper,
-		LongestSess:    p.Stats.LongestSession,
-		LongestSessN:   p.Stats.LongestSessionViews,
-		LongestSessS:   int(p.Stats.LongestSessionSpan.Seconds()),
-		DeepestRabbit:  p.Stats.DeepestRabbit,
-		DeepestRabbitN: p.Stats.DeepestRabbitLen,
-		BusiestDay:     p.Stats.BusiestDay,
-		BusiestDayN:    p.Stats.BusiestDayViews,
+		Views:        p.Stats.Views,
+		Sessions:     p.Stats.Sessions,
+		OverlapViews: p.Stats.OverlapViews,
+		HoursUpper:   p.Stats.HoursUpper,
+		LongestSess:  p.Stats.LongestSession,
+		LongestSessN: p.Stats.LongestSessionViews,
+		LongestSessS: int(p.Stats.LongestSessionSpan.Seconds()),
+		DeepestChain: p.Stats.DeepestChain,
+		BusiestDay:   p.Stats.BusiestDay,
+		BusiestDayN:  p.Stats.BusiestDayViews,
 	}
 	// Last, because it is the one part that may still put a name into a lookup
 	// table: a subscription never watched appears in no view row, and a

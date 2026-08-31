@@ -18,7 +18,7 @@ package report
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
 var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
-	overviewJS + detailJS + clusterJS + reportJS + introJS + pageTail
+	overviewJS + detailJS + clusterJS + reportJS + rankJS + introJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -253,6 +253,34 @@ circle.hit:hover:not([aria-pressed="true"]),
 circle.hit:focus-visible:not([aria-pressed="true"]) {
   stroke: var(--fg); stroke-width: 2; stroke-opacity: .55;
 }
+/* A chain bracket says it leads somewhere with a chevron above the bar, so
+   it reads as a control on a touchscreen and in a screenshot too, where a
+   cursor says nothing. The focused one is wider and fully opaque — the same
+   "picked beats hovered" rule the ring follows. */
+g.chain { cursor: pointer; }
+g.chain > rect { opacity: .8; }
+g.chain:hover > rect, g.chain:focus-visible > rect { opacity: 1; }
+g.chain.on > rect { opacity: 1; }
+g.chain:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px; }
+.chainpanel h2 { margin-bottom: .1rem; }
+/* The neighbour row: three steps on one line, the ones that lead nowhere
+   greyed rather than removed, so the row does not shift as you walk it. */
+.near { display: flex; flex-wrap: wrap; gap: .45rem; align-items: baseline;
+        font-size: .85rem; margin: .35rem 0 .6rem; }
+.near a { color: var(--bar); text-decoration: none; border-bottom: 1px solid transparent; }
+.near a:hover, .near a:focus-visible { border-bottom-color: currentColor; }
+/* The ranking views' sort bar. The active key is text, not a link to the
+   page you are already on — and it stays bold so the row reads as a state,
+   not as a list of equal choices. */
+.sortbar { display: flex; flex-wrap: wrap; gap: .55rem; align-items: baseline;
+           font-size: .85rem; margin: .3rem 0 .2rem; }
+.sortbar a { color: var(--bar); text-decoration: none; border-bottom: 1px solid transparent; }
+.sortbar a:hover, .sortbar a:focus-visible { border-bottom-color: currentColor; }
+.sortbar .on { font-weight: 600; }
+/* The second line of a ranked row: what led in, what let out. Indented under
+   the row it explains rather than beside it, so the columns above stay a
+   table. */
+.rwhy { margin: -.15rem 0 .45rem .4rem; font-size: .76rem; color: var(--muted); }
 /* The report's month columns are hit by an invisible zone drawn OVER the
    stacked bars, so the shared opacity fade has nothing to fade. It tints
    instead — faint enough that the bars keep their colours through it, which
@@ -404,6 +432,7 @@ const R_TS = 1, R_DUR = 2, R_AREA = 3, R_SUB = 4, R_CHAN = 5,
       R_MODE = 6, R_EDGE = 7, R_GAP = 8, R_FLAGS = 9, R_TITLE = 10;
 const S_ROW = 0, S_TS = 1, S_SPAN = 2, S_N = 3, S_GAP = 4, S_DAY = 5;
 const DY_ED = 0, DY_VIEWS = 1, DY_AREA = 2, DY_FROM = 3, DY_TO = 4;
+const C_SESS = 0, C_FROM = 1, C_TO = 2, C_LEN = 3, C_AREA = 4, C_SPAN = 5, C_DUR = 6;
 
 const isOverlap = r => (r[R_FLAGS] & 1) !== 0;
 const isRabbit = r => (r[R_FLAGS] & 2) !== 0;
@@ -417,6 +446,37 @@ function sessionViews(si) {
 
 const dayByDate = new Map();
 if (D.days) D.days.forEach((d, i) => dayByDate.set(dayDate(d[DY_ED]), i));
+
+// chainsOf lists the chains of one sitting as GLOBAL indices into D.chains,
+// oldest first — the order the session view draws them in, which is what
+// makes the k in "#/session/<i>/chain/<k>" the one a reader counts from the
+// top. Go already ships them that way; this only groups them.
+const chainsBySess = new Map();
+if (D.chains) D.chains.forEach((c, i) => {
+  const list = chainsBySess.get(c[C_SESS]);
+  if (list) list.push(i); else chainsBySess.set(c[C_SESS], [i]);
+});
+const chainsOf = si => chainsBySess.get(si) || [];
+
+// chainRows returns the rows a chain covers, oldest first, so a caller reads
+// it in the direction it was watched.
+const chainRows = ci => {
+  const c = D.chains[ci];
+  return D.rows.slice(c[C_FROM], c[C_TO] + 1).reverse();
+};
+
+// chainDoor is the main-lane view the chain was entered FROM: the row just
+// past its old end, still inside the same sitting. Null when the chain
+// opened the sitting — then nothing on the timeline led into it.
+function chainDoor(ci) {
+  const c = D.chains[ci];
+  const s = D.sess[c[C_SESS]];
+  const last = s[S_ROW] + s[S_N]; // the sitting's oldest row
+  for (let r = c[C_TO] + 1; r <= last; r++) {
+    if (!isOverlap(D.rows[r])) return D.rows[r];
+  }
+  return null;
+}
 
 // ---- the shared card ---------------------------------------------------
 
@@ -459,6 +519,58 @@ function viewCard(r) {
   card.appendChild(l1);
   card.appendChild(l2);
   return card;
+}
+
+// chainName is what a rabbit hole is called wherever it is listed. The
+// label from the model, if this run had one, otherwise the plain facts —
+// the page has to read the same with an LLM and without one, so the name is
+// decoration and never structure.
+function chainName(ci) {
+  const c = D.chains[ci];
+  const label = D.holeLabels && D.holeLabels[ci];
+  return label || ("chain of " + c[C_LEN] + " · " + areaName(c[C_AREA]));
+}
+
+// chainFacts is the sentence that reads a chain backwards: how deep it went,
+// how long it held, how many channels fed it, which door led in and how it
+// ended. Everything but the door is a walk over the chain's own rows —
+// nothing of this rides on the payload.
+function chainFacts(ci) {
+  const c = D.chains[ci];
+  const rows = chainRows(ci);
+  const chans = new Set();
+  let held = 0, edged = 0, exit = "";
+  for (const r of rows) {
+    if (isOverlap(r)) continue;
+    if (D.chans[r[R_CHAN]]) chans.add(r[R_CHAN]);
+    const e = D.edges[r[R_EDGE]];
+    if (e) { edged++; if (e === "through") held++; }
+    exit = e || exit;
+  }
+  const door = chainDoor(ci);
+  return {
+    len: c[C_LEN], area: areaName(c[C_AREA]), span: c[C_SPAN], durS: c[C_DUR],
+    chans: chans.size, held: held, edged: edged, exit: exit,
+    door: door ? areaName(door[R_AREA]) : "",
+  };
+}
+
+// chainLine is chainFacts as one line of prose: the reverse-algorithm
+// sentence — where you fell in, and what let you back out.
+function chainLine(ci) {
+  const f = chainFacts(ci);
+  const bits = [f.len + " videos", f.area];
+  if (f.span > 0) bits.push("over " + dur(f.span));
+  bits.push(f.chans === 1 ? "one channel" : f.chans + " channels");
+  const tail = [];
+  if (f.door) tail.push("entered from " + f.door);
+  if (f.exit) tail.push("ended by " + EDGE_TEXT[f.exit]);
+  return bits.join(" · ") + (tail.length ? " — " + tail.join(", ") : "");
+}
+
+function chainTip(ci) {
+  return "<b>" + esc(chainName(ci)) + '</b><span class="m">' +
+    esc(chainLine(ci)) + "</span>";
 }
 
 // sessionLine is the one-line summary a sitting gets wherever it is listed.
@@ -780,10 +892,43 @@ function route() {
     }
     const s = D.sess[si];
     const date = dayDate(D.days[s[S_DAY]][DY_ED]);
-    crumbs([{ text: "overview", hash: "/" }, { text: date, hash: "/day/" + date },
-            { text: clock(s[S_TS]) + " sitting" }]);
+    // A chain is addressed by its ordinal INSIDE the sitting, counted from
+    // the top of the diagram — an index into D.chains would be shorter but
+    // would move whenever the export is re-read, and this link should still
+    // land next month.
+    const chains = chainsOf(si);
+    let focusK = -1;
+    if (parts[2] === "chain" && parts[3] !== undefined) {
+      focusK = parseInt(parts[3], 10);
+      if (!(focusK >= 0 && focusK < chains.length)) {
+        crumbs([{ text: "overview", hash: "/" }, { text: date, hash: "/day/" + date },
+                { text: clock(s[S_TS]) + " sitting", hash: "/session/" + si },
+                { text: "chain " + parts[3] }]);
+        notFound(viewEl, "that chain");
+        return;
+      }
+    }
+    const trail = [{ text: "overview", hash: "/" }, { text: date, hash: "/day/" + date }];
+    if (focusK >= 0) {
+      trail.push({ text: clock(s[S_TS]) + " sitting", hash: "/session/" + si });
+      trail.push({ text: chainName(chains[focusK]) });
+    } else {
+      trail.push({ text: clock(s[S_TS]) + " sitting" });
+    }
+    crumbs(trail);
     scrollTo(0, 0);
-    teardown = renderSession(viewEl, si) || null;
+    teardown = renderSession(viewEl, si, focusK) || null;
+    return;
+  }
+  if (parts[0] === "holes") {
+    // Sort key and area filter both live in the hash: re-sorting is a step
+    // the back button can undo, and a sorted list is a link worth sharing.
+    const sortId = parts[1] || "depth";
+    const area = parts[2] ? decodeURIComponent(parts[2]) : "";
+    crumbs([{ text: "overview", hash: "/" }, { text: "rabbit holes" }]);
+    scrollTo(0, 0);
+    if (!D.chains || !D.chains.length) { notFound(viewEl, "a rabbit hole"); return; }
+    teardown = renderHoles(viewEl, sortId, area) || null;
     return;
   }
   if (parts[0] === "list") {

@@ -161,6 +161,39 @@ function miniList() {
   return s;
 }
 
+// The rabbit holes as a depth histogram: how many runs were 4 videos long, 5,
+// 6, and how far the tail reaches. The card's promise is a RANKING, so the
+// miniature shows the distribution the ranking sorts — not one example chain,
+// which would say nothing about whether the deepest is unusual.
+function miniHoles() {
+  const s = mini("how deep the rabbit holes went");
+  const cs = D.chains || [];
+  if (!cs.length) return s;
+  const bins = new Map();
+  let max = 1, deepest = 0;
+  for (const c of cs) {
+    const n = c[C_LEN];
+    const v = (bins.get(n) || 0) + 1;
+    bins.set(n, v);
+    max = Math.max(max, v);
+    deepest = Math.max(deepest, n);
+  }
+  const lens = [...bins.keys()].sort((a, b) => a - b);
+  const w = Math.max(2, Math.min(9, (MW - 8) / Math.max(1, lens.length) - 1));
+  const g = svg("g", { class: "rise" });
+  lens.forEach((n, i) => {
+    // sqrt, like the calendar: one enormous first bar would flatten the tail
+    // into nothing, and the tail is the half worth looking at.
+    const h = Math.max(2, Math.sqrt(bins.get(n) / max) * (MH - 12));
+    g.appendChild(svg("rect", {
+      x: 4 + i * (w + 1), y: MH - 4 - h, width: w, height: h, rx: 1.5,
+      fill: "var(--bar)", "fill-opacity": 0.35 + 0.65 * (n / deepest),
+    }));
+  });
+  s.appendChild(g);
+  return s;
+}
+
 // The months of the report, as bars — the same aggregate the report draws in
 // full, at the size of a sparkline. The outline travels because the view
 // behind this card spans years rather than a moment; it traces the tops of
@@ -242,6 +275,15 @@ function introCards(st) {
       "The path through one sitting, video by video. The longest ran " +
       st.longestSessN + " of them.",
       miniSitting(st.longestSess)));
+  }
+  // Only with chains on the payload: a card leading to "there is none" would
+  // be worse than no card.
+  if ((D.chains || []).length) {
+    const deepest = st.deepestChain >= 0 ? D.chains[st.deepestChain][C_LEN] : 0;
+    ways.appendChild(card("#/holes", "the rabbit holes",
+      D.chains.length.toLocaleString() + " runs of " + {{.RabbitLen}} + "+ videos on one area, " +
+      "ranked — the deepest went " + deepest + " deep. Each says what pulled you in.",
+      miniHoles()));
   }
   ways.appendChild(card("#/list", "all views",
     D.views.toLocaleString() + " views on one timeline, newest first.",
