@@ -41,6 +41,7 @@ func newRetryPass(t *testing.T, views []takeout.View, metas map[string]enrich.Me
 		verdicts:     map[string]videoVerdict{},
 		llmDown:      opts.noLLM,
 		retryContext: map[string]bool{},
+		retryTopic:   map[string]string{},
 	}
 	return r, r.resolveCached(r.matchRules())
 }
@@ -78,6 +79,13 @@ func TestRetryTargetsSelectOnlyTheirSet(t *testing.T) {
 		{"unclear", nil, nil, []string{"cccccccccc3"}},
 		{"all", []string{"aaaaaaaaaa1"}, []string{"bbbbbbbbbb2"}, []string{"cccccccccc3"}},
 		{"no-sub,no-mode", []string{"aaaaaaaaaa1"}, []string{"bbbbbbbbbb2"}, nil},
+		// A named topic matches the whole canonical string, not a prefix:
+		// "topic:music" leaves "music/jazz" alone and takes the bare area.
+		{"topic:music/jazz", nil, nil, []string{"dddddddddd4"}},
+		{"topic:music", nil, nil, []string{"aaaaaaaaaa1"}},
+		// ...and it wins over the field round that would also have selected
+		// it — the full re-ask answers the sub anyway.
+		{"no-sub,topic:music", nil, nil, []string{"aaaaaaaaaa1"}},
 	} {
 		t.Run(tc.retry, func(t *testing.T) {
 			_, live := newRetryPass(t, views, metas, cached,
@@ -133,14 +141,19 @@ func TestRetryUnclearRefusesURLOnlyTombstones(t *testing.T) {
 // list (health check) and chat completions, answered from a fixed script.
 // In-process like fakeChatTransport — httptest cannot bind in this sandbox.
 type retryTransport struct {
-	calls *int
-	reply string
+	calls   *int
+	reply   string
+	prompts *[]string // nil unless a test asserts on what was asked
 }
 
 func (f retryTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	body := fmt.Sprintf(`{"data":[{"id":%q}]}`, "test-chat")
 	if strings.Contains(r.URL.Path, "chat") {
 		*f.calls++
+		if f.prompts != nil && r.Body != nil {
+			asked, _ := io.ReadAll(r.Body)
+			*f.prompts = append(*f.prompts, string(asked))
+		}
 		body = fmt.Sprintf(`{"choices":[{"message":{"content":%q}}]}`, f.reply)
 	}
 	return &http.Response{
@@ -151,13 +164,19 @@ func (f retryTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func fakeClientOpts(calls *int, reply string) classifyOpts {
+	return fakeClientRecording(calls, reply, nil)
+}
+
+// fakeClientRecording additionally collects every request body, for the test
+// that has to prove what the prompt did NOT contain.
+func fakeClientRecording(calls *int, reply string, prompts *[]string) classifyOpts {
 	return classifyOpts{
 		llmBatch: 2,
 		newClient: func(model, baseURL string) *omlx.Client {
 			return &omlx.Client{
 				BaseURL: "http://fake.invalid/v1",
 				Model:   "test-chat",
-				HTTP:    &http.Client{Transport: retryTransport{calls: calls, reply: reply}},
+				HTTP:    &http.Client{Transport: retryTransport{calls: calls, reply: reply, prompts: prompts}},
 			}
 		},
 	}
@@ -247,5 +266,81 @@ func TestSubRoundDropsHesitantAnswers(t *testing.T) {
 	}
 	if !reflect.DeepEqual(hesitant.Retried, []string{"sub"}) {
 		t.Errorf("hesitant sub: Retried = %v, want the marker even without an accepted answer", hesitant.Retried)
+	}
+}
+
+// TestRetryTopicDropsItsOwnSeed is the reason "-retry topic:<t>" exists as
+// code instead of a shell recipe. Deleting the verdict files by hand did two
+// things: it forced a re-ask, and it took the bad sub out of the sub seeds
+// (collectSubSeeds counts surviving verdicts). Only the first is obvious.
+// At temperature 0 a re-ask with the catch-all still in the seed list gets
+// the same answer back — the round would cost requests and change nothing.
+// So the prompt must not contain the topic being re-asked, and the marker
+// must keep a model that answers it AGAIN from being asked a third time.
+func TestRetryTopicDropsItsOwnSeed(t *testing.T) {
+	taxonomy := retryConfig().Fingerprint()
+	views := []takeout.View{
+		view("aaaaaaaaaa1", "video one", "c1"),
+		view("bbbbbbbbbb2", "video two", "c2"),
+		view("cccccccccc3", "video three", "c3"), // healthy, must not be touched
+	}
+	healthy := classify.LLMVerdict{Topic: "music/blues", Mode: "consume", Confidence: 0.9,
+		Model: "m", Basis: classify.BasisTitleOnly, Taxonomy: taxonomy}
+	cached := map[string]classify.LLMVerdict{
+		"aaaaaaaaaa1": {Topic: "music/jazz", Mode: "consume", Confidence: 0.7, Model: "m", Basis: classify.BasisTitleOnly, Taxonomy: taxonomy},
+		"bbbbbbbbbb2": {Topic: "music/jazz", Mode: "consume", Confidence: 0.7, Model: "m", Basis: classify.BasisTitleOnly, Taxonomy: taxonomy},
+		"cccccccccc3": healthy,
+	}
+	var (
+		calls   int
+		prompts []string
+	)
+	// The model answers the old topic again for the first video: that is the
+	// case the marker is for, and the one a re-run must not pay for twice.
+	opts := fakeClientRecording(&calls, "1 music/jazz consume 0.9\n2 dev/talks learn 0.8", &prompts)
+	opts.retry = "topic:music/jazz"
+	r, live := newRetryPass(t, views, nil, cached, opts)
+	if !reflect.DeepEqual(live.full, []string{"aaaaaaaaaa1", "bbbbbbbbbb2"}) {
+		t.Fatalf("full = %v, want exactly the two carrying the named topic", live.full)
+	}
+	if live.sub != nil || live.mode != nil || len(r.retryContext) != 0 {
+		t.Errorf("sub=%v mode=%v context=%v, want a full re-ask and no channel context",
+			live.sub, live.mode, r.retryContext)
+	}
+	if err := r.askLive(live); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("chat calls = %d, want 1 batch of 2", calls)
+	}
+	if strings.Contains(prompts[0], "jazz") {
+		t.Errorf("the re-asked topic seeded its own replacement prompt:\n%s", prompts[0])
+	}
+	if !strings.Contains(prompts[0], "blues") {
+		t.Errorf("the area lost its other seeds too:\n%s", prompts[0])
+	}
+
+	llmCache := classify.Cache{Dir: r.p.classifyCache()}
+	same, _ := llmCache.Read("aaaaaaaaaa1")
+	if same.Topic != "music/jazz" || !reflect.DeepEqual(same.Retried, []string{"topic:music/jazz"}) {
+		t.Errorf("re-answered verdict = %+v, want the model's answer kept and marked", same)
+	}
+	moved, _ := llmCache.Read("bbbbbbbbbb2")
+	if moved.Topic != "dev/talks" || moved.Mode != "learn" {
+		t.Errorf("re-asked verdict = %+v, want the new answer", moved)
+	}
+	if _, ok := llmCache.Read("cccccccccc3"); ok {
+		t.Errorf("the healthy verdict was rewritten, want it untouched")
+	}
+
+	// Idempotence: the same selector again asks nothing, even though one
+	// verdict still carries the named topic. It is the model's answer now.
+	calls = 0
+	r2, live2 := newRetryPass(t, views, nil, cached, opts)
+	if err := r2.askLive(live2); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 || live2.count() != 0 {
+		t.Errorf("second retry made %d calls over %d ids, want 0/0", calls, live2.count())
 	}
 }

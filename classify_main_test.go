@@ -266,7 +266,7 @@ func TestCollectSubSeeds(t *testing.T) {
 		"gaming/rust", "gaming/rust", "gaming/cs2",
 		"gaming", // a bare area contributes no sub
 		"dev/talks", "unclear",
-	})
+	}, nil)
 	if got := seeds["gaming"]; len(got) != 2 || got[0] != "rust" || got[1] != "cs2" {
 		t.Errorf("gaming seeds = %v, want [rust cs2] — most used first", got)
 	}
@@ -279,8 +279,21 @@ func TestCollectSubSeeds(t *testing.T) {
 
 	// Equal counts sort by name: a prompt that reshuffles between runs
 	// invites the model to reshuffle its answers with it.
-	if got := collectSubSeeds(cfg, []string{"gaming/zelda", "gaming/aoe"})["gaming"]; got[0] != "aoe" {
+	if got := collectSubSeeds(cfg, []string{"gaming/zelda", "gaming/aoe"}, nil)["gaming"]; got[0] != "aoe" {
 		t.Errorf("tie-break = %v, want the name to decide", got)
+	}
+
+	// What "-retry topic:<t>" needs: the named topic leaves the seeds, its
+	// area's other subs stay. Otherwise the re-ask offers the catch-all sub
+	// back to the model and buys the same answer again (temperature 0).
+	dropped := collectSubSeeds(cfg, []string{
+		"gaming/rust", "gaming/cs2", "dev/talks",
+	}, []string{"gaming/cs2"})
+	if got := dropped["gaming"]; len(got) != 1 || got[0] != "rust" {
+		t.Errorf("gaming seeds = %v, want the dropped sub gone and rust kept", got)
+	}
+	if got := dropped["dev"]; len(got) != 1 || got[0] != "talks" {
+		t.Errorf("dev seeds = %v, want an untouched area untouched", got)
 	}
 
 	// Bounded, so the prompt does not grow with the corpus.
@@ -288,7 +301,7 @@ func TestCollectSubSeeds(t *testing.T) {
 	for i := 0; i < subSeedsPerArea*3; i++ {
 		many = append(many, fmt.Sprintf("gaming/sub%02d", i))
 	}
-	if got := collectSubSeeds(cfg, many)["gaming"]; len(got) != subSeedsPerArea {
+	if got := collectSubSeeds(cfg, many, nil)["gaming"]; len(got) != subSeedsPerArea {
 		t.Errorf("seeds = %d, want them capped at %d", len(got), subSeedsPerArea)
 	}
 }
@@ -468,7 +481,7 @@ func TestCollectSubSeedsSkipsDeadAreas(t *testing.T) {
 		"security/malware", // so was "security"
 		"music",            // an area with no sub seeds nothing
 		"Gaming/AOE",       // case folds into the canonical area and sub
-	})
+	}, nil)
 	if _, ok := seeds["dev"]; ok {
 		t.Errorf("dead area seeded into the prompt: %v", seeds)
 	}

@@ -40,7 +40,7 @@ func addLLMFlags(fs *flag.FlagSet) llmFlags {
 		llmWorkers:   fs.Int("llm-workers", 1, "parallel LLM requests (raise only if the server actually decodes concurrently)"),
 		keepVerdicts: fs.Bool("keep-verdicts", false, "keep cached verdicts even though the taxonomy changed (for a reworded desc — a changed area list needs a re-ask)"),
 		retry: fs.String("retry", "",
-			`re-ask cached verdicts by DEFECT: "no-sub" (area without a sub), "no-mode" (topic without a mode), "unclear" (only the ones with usable text), "all", or a comma-separated list`),
+			`re-ask cached verdicts by DEFECT: "no-sub" (area without a sub), "no-mode" (topic without a mode), "unclear" (only the ones with usable text), "topic:<exact>" (a topic that is present but wrong), "all", or a comma-separated list`),
 	}
 }
 
@@ -141,6 +141,7 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		verdicts:     map[string]videoVerdict{},
 		llmDown:      opts.noLLM,
 		retryContext: map[string]bool{},
+		retryTopic:   map[string]string{},
 	}
 	live := r.resolveCached(r.matchRules())
 	if err := r.askLive(live); err != nil {
@@ -168,8 +169,9 @@ type pass struct {
 	st            passStats
 	llmDown       bool // starts as opts.noLLM, flips on a connection loss
 	parseWarnings []string
-	retryContext  map[string]bool // "-retry unclear" ids: get channel context, keep their marker on overwrite
-	retryRefused  int             // unclear ids -retry refused for carrying no signal (URL-only, no channel)
+	retryContext  map[string]bool   // "-retry unclear" ids: get channel context, keep their marker on overwrite
+	retryTopic    map[string]string // "-retry topic:<t>" ids -> the topic that selected them, for the marker
+	retryRefused  int               // unclear ids -retry refused for carrying no signal (URL-only, no channel)
 }
 
 type videoVerdict struct {
@@ -265,6 +267,26 @@ func appendRetried(old []string, kind string) []string {
 	return append(slices.Clone(old), kind)
 }
 
+// retryTopicPrefix marks the one -retry selector that carries a value. The
+// others test a FIELD (missing sub, missing mode, unclear topic); a topic
+// that is present but WRONG is not something a field test can see, so it has
+// to be named: -retry topic:<area>/<sub>. The case it was built for is a sub
+// that grew into a catch-all across unrelated channels — a name that means
+// nothing, on videos that each have a real subject.
+const retryTopicPrefix = "topic:"
+
+// retryTopics lists the exact topics named by "topic:<t>" parts of -retry.
+// Compared against the canonical topic, i.e. the string the report shows.
+func (r *pass) retryTopics() []string {
+	var out []string
+	for _, part := range strings.Split(r.opts.retry, ",") {
+		if p := strings.TrimSpace(part); strings.HasPrefix(p, retryTopicPrefix) {
+			out = append(out, strings.TrimPrefix(p, retryTopicPrefix))
+		}
+	}
+	return out
+}
+
 // retryTargets matches a cached verdict against the -retry selector by
 // DEFECT, never by age: the fingerprint is untouched, nothing that already
 // answers cleanly is re-asked, and each defect is asked at most once
@@ -288,11 +310,24 @@ func (r *pass) retryTargets(id string, v classify.LLMVerdict, topic string, usab
 		if want("unclear") && !slices.Contains(v.Retried, "context") {
 			if hasUsableText(r.items[id]) {
 				full = true
+				r.retryContext[id] = true
 			} else {
 				r.retryRefused++
 			}
 		}
 		return false, false, full
+	}
+	// A named topic is re-asked in FULL and wins over the field selectors:
+	// the full round answers sub and mode anyway, so adding a targeted round
+	// on top would pay twice for one video. What makes the re-ask more than
+	// a paid no-op is on the prompt side — the named topic is dropped from
+	// the sub seeds (see askLive), because at temperature 0 the same prompt
+	// returns the same answer, and a catch-all sub offered back as a seed IS
+	// the prompt that grew it. That seed removal is what deleting the verdict
+	// files by hand used to achieve, and why this selector is worth its code.
+	if slices.Contains(r.retryTopics(), topic) && !slices.Contains(v.Retried, retryTopicPrefix+topic) {
+		r.retryTopic[id] = topic
+		return false, false, true
 	}
 	if want("no-sub") && !strings.Contains(topic, "/") && !slices.Contains(v.Retried, "sub") {
 		sub = true
@@ -363,7 +398,6 @@ func (r *pass) resolveCached(needLLM []string) (live liveSet) {
 				}
 				if full {
 					live.full = append(live.full, id)
-					r.retryContext[id] = true
 				}
 			}
 			continue
@@ -392,7 +426,7 @@ func (r *pass) resolveCached(needLLM []string) (live liveSet) {
 	// select) is printed whether or not -progress is on.
 	if r.opts.retry != "" {
 		fmt.Printf("-retry %q: %d sub, %d mode, %d full re-asks", r.opts.retry,
-			len(live.sub), len(live.mode), len(r.retryContext))
+			len(live.sub), len(live.mode), len(r.retryContext)+len(r.retryTopic))
 		if r.retryRefused > 0 {
 			fmt.Printf("; %d carry nothing but their own URL and no channel — not asked", r.retryRefused)
 		}
@@ -496,7 +530,7 @@ func (r *pass) askLive(set liveSet) error {
 		for _, v := range r.cached {
 			topicsSoFar = append(topicsSoFar, v.Topic)
 		}
-		seeds := collectSubSeeds(r.cfg, topicsSoFar)
+		seeds := collectSubSeeds(r.cfg, topicsSoFar, r.retryTopics())
 
 		if len(r.retryContext) > 0 {
 			r.fillChannelContext()
@@ -790,6 +824,12 @@ func (r *pass) askFull(client *omlx.Client, llmCache classify.Cache, live []stri
 			// is unclear AGAIN records that the context question was asked,
 			// or the next -retry unclear pays for it anew.
 			v.Retried = appendRetried(r.cached[id].Retried, "context")
+		} else if t, ok := r.retryTopic[id]; ok {
+			// Same for a named topic, and it matters more here: the model
+			// may well answer the old topic again, and that answer is the
+			// model's, not a cache leftover. The marker records it, so the
+			// same selector cannot buy the same requests twice.
+			v.Retried = appendRetried(r.cached[id].Retried, retryTopicPrefix+t)
 		}
 		if err := llmCache.Write(id, v); err != nil {
 			if fatal == nil {
@@ -1015,11 +1055,16 @@ const subSeedsPerArea = 12
 // prompt that the area list right above does not contain — the model then
 // reuses them one level down, which is how "dev" (an area back then) turned
 // up as a sub under music, education and science-technology alike.
-func collectSubSeeds(cfg *rules.Config, topics []string) map[string][]string {
+//
+// drop is what "-retry topic:<t>" is re-asking: those verdicts must not seed
+// the prompt that is meant to replace them. Filtered here rather than at the
+// call site because the comparison only means anything after NormalizeTopic,
+// which is this function's job.
+func collectSubSeeds(cfg *rules.Config, topics, drop []string) map[string][]string {
 	perArea := map[string]map[string]int{}
 	for _, t := range topics {
 		canonical, ok := cfg.NormalizeTopic(t)
-		if !ok {
+		if !ok || slices.Contains(drop, canonical) {
 			continue
 		}
 		area, sub := rules.SplitTopic(canonical)
