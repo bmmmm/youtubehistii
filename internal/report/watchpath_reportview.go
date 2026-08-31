@@ -121,13 +121,25 @@ function reportRow(el, cls, name, mode, views, dur, area, of) {
   return row;
 }
 
+// goArrow is the affordance every new link on this view carries: an arrow that
+// is on screen at rest. A hover tint and a pointer cursor are only visible to
+// someone who is already pointing at the row, which is no help in deciding
+// whether to point at it.
+function goArrow(hash, label) {
+  const a = $("a", "rgo", "→");
+  a.href = hash;
+  a.setAttribute("aria-label", label);
+  return a;
+}
+
 function reportTopics(R) {
   const panel = $("div", "panel");
   panel.appendChild($("h2", null, "topics"));
   const rule = $("p", "muted",
     "One row per area, most-watched first, with the mode most of its videos were " +
     "classified as. The bar is the area against the largest one; open a row and the " +
-    "bars underneath are its subjects against the area itself. ");
+    "bars underneath are its subjects against the area itself. Every arrow leads to " +
+    "that exact row in the tree, at whichever level it sits. ");
   const link = $("span", "rlink", "The same hierarchy drawn as circles →");
   hit(link, "#/topics", "open the topic tree");
   rule.appendChild(link);
@@ -142,12 +154,27 @@ function reportTopics(R) {
   // Most-watched first is guaranteed by Go, so the first row is the scale.
   const max = topics[0][RT_VIEWS];
   const table = $("div", "rt");
+  // Every name in this table is an address in the topic tree — an area at the
+  // top level, a subject under it — and this table used to be the one view
+  // that led nowhere: it listed the whole hierarchy and the only way out was
+  // the one link in the rule above. A row that names something the page can
+  // open, links to it.
   for (const tp of topics) {
     const name = tp[RT_NAME], kids = rtKids(tp);
+    const hash = topicHash(name, "");
     if (!kids) {
-      const row = reportRow("div", "rrow", name, tp[RT_MODE], tp[RT_VIEWS], tp[RT_DUR], name, max);
+      // The arrow is the link here too, rather than the whole row: at this
+      // level a row either opens its subjects or has none, and two rows that
+      // look the same may not do different things when clicked in the middle.
+      // The arrow sits outside the row for the same reason it does below — so
+      // the bars of every top-level row still end at the same x.
+      const row = reportRow("div", "rrow", name, tp[RT_MODE],
+        tp[RT_VIEWS], tp[RT_DUR], name, max);
       row.insertBefore($("span", "rcar"), row.firstChild);
-      table.appendChild(row);
+      const line = $("div", "rline");
+      line.appendChild(row);
+      if (hash) line.appendChild(goArrow(hash, "open " + name + " in the topic tree"));
+      table.appendChild(line);
       continue;
     }
 
@@ -163,9 +190,19 @@ function reportTopics(R) {
 
     const box = $("div", "rsubs");
     box.hidden = true;
+    // A subject row has nothing to open, and it sits in its own indented box
+    // against its own scale — so here the whole row is the link, and it is a
+    // real anchor: middle click and "open in a new tab" are things no click
+    // handler can give back.
     for (const k of kids) {
-      box.appendChild(reportRow("div", "rrow rsub", k[RT_NAME], k[RT_MODE], k[RT_VIEWS],
-        k[RT_DUR], name, tp[RT_VIEWS]));
+      const kh = k[RT_NAME] ? topicHash(name, k[RT_NAME]) : null;
+      const sub = reportRow(kh ? "a" : "div", "rrow rsub", k[RT_NAME], k[RT_MODE],
+        k[RT_VIEWS], k[RT_DUR], name, tp[RT_VIEWS]);
+      if (kh) {
+        sub.href = kh;
+        sub.appendChild($("span", "rgo", "→"));
+      }
+      box.appendChild(sub);
     }
     row.addEventListener("click", () => {
       const open = box.hidden;
@@ -174,7 +211,14 @@ function reportTopics(R) {
       row.setAttribute("aria-expanded", open ? "true" : "false");
     });
 
-    table.appendChild(row);
+    // Opening the subjects and travelling to the area are two different
+    // actions, so they are two controls on one line: an anchor may not sit
+    // inside a button, and folding both into one would cost whichever of them
+    // lost the click.
+    const line = $("div", "rline");
+    line.appendChild(row);
+    if (hash) line.appendChild(goArrow(hash, "open " + name + " in the topic tree"));
+    table.appendChild(line);
     table.appendChild(box);
   }
   panel.appendChild(table);
@@ -203,13 +247,40 @@ function monthTotal(m) {
   return n;
 }
 
+// firstDayByMonth is how a month on this report becomes a place on the
+// timeline: the FIRST day of that month that carries a sitting.
+//
+// It is the entry into the month, and it needs no state of its own — the day
+// view already exists at #/day/<date> and takes it from there. The busiest day
+// of the month was the other candidate and was dropped: it answers "where was
+// the peak", which is a different question from "show me this month", and it
+// would land the reader in the middle of a stretch they have not read yet.
+//
+// A month can have no day at all. A sitting counts on the day it BEGAN, so an
+// evening that runs past midnight on the last of the month puts its views in
+// the next month's bucket while its day stays in this one — the bar then
+// simply does not link, rather than pointing at a day that is not there.
+//
+// One pass over D.days, which runs oldest first, so the first key wins.
+function firstDayByMonth() {
+  const out = new Map();
+  for (const d of (D.days || [])) {
+    const date = dayDate(d[DY_ED]);
+    const key = date.slice(0, 7);
+    if (!out.has(key)) out.set(key, date);
+  }
+  return out;
+}
+
 function reportMonths(R) {
   const panel = $("div", "panel");
   panel.appendChild($("h2", null, "month by month"));
   panel.appendChild($("p", "muted",
     "One bar per calendar month, stacked by mode, scaled against the busiest month. " +
     "Months in between with nothing watched are drawn as gaps rather than skipped — " +
-    "a row of bars that leaves its empty stretches out lies about the axis."));
+    "a row of bars that leaves its empty stretches out lies about the axis. " +
+    "The drawing is a control: click a month to open the first day in it that " +
+    "carries a sitting, and read on from there."));
   panel.appendChild(modeLegend());
 
   const ms = rlist(R.months);
@@ -237,6 +308,7 @@ function reportMonths(R) {
     if (cols.length > 2400) break; // a fixture with a broken date may not hang the page
   }
 
+  const firstDay = firstDayByMonth();
   const w = RB_PAD + cols.length * (RB_W + RB_GAP) + RB_PAD;
   const h = RB_H + 34;
   const s = svg("svg", { role: "img", width: w, height: h, viewBox: "0 0 " + w + " " + h });
@@ -272,15 +344,27 @@ function reportMonths(R) {
         fill: "var(--" + (D.modes[mi] || "unclear") + ")",
       }));
     });
-    const zone = svg("rect", { x: x, y: 8, width: RB_W, height: RB_H - 8, fill: "transparent" });
+    // The zone is drawn OVER the stacked bars, so it is what a pointer meets;
+    // its class is what gives it a hover of its own, since a transparent rect
+    // has no opacity to fade. No tabindex, and for the reason clickTo states:
+    // a drawn shape is a picture you click, and a span of years here would put
+    // hundreds of unannounced focus stops in front of every control after the
+    // chart. The keyboard path into a day is the overview's tiles and the
+    // breadcrumb, not this row of bars.
+    const day = firstDay.get(c.key);
+    const zone = svg("rect", {
+      x: x, y: 8, width: RB_W, height: RB_H - 8, fill: "transparent", class: "mhit",
+    });
     hover(zone, () => {
       const bits = [];
       c.m[RM_MODES].forEach((v, mi) => {
         if (v) bits.push(esc(D.modes[mi] || "unclear") + " " + v.toLocaleString());
       });
       return "<b>" + c.key + "</b><span class='m'>" + total.toLocaleString() +
-        plural(" view", total) + " · " + bits.join(" · ") + "</span>";
+        plural(" view", total) + " · " + bits.join(" · ") +
+        (day ? " &middot; click to open " + day : "") + "</span>";
     });
+    if (day) clickTo(zone, "#/day/" + day);
     s.appendChild(zone);
   });
 
@@ -294,6 +378,10 @@ function reportMonths(R) {
 
 // Both lists are the card stack the topic tree uses for its children: same
 // row, same two lines, so a name reads the same wherever it appears.
+//
+// second is a string or a node: the second line carries the row's topic, and a
+// topic is an address — so the caller hands over a fragment with a link in it
+// where there is one, and plain text where there is not.
 function nameRow(name, right, second, area) {
   const row = $("div", "tile");
   row.style.setProperty("--area", areaColor(D.areas.indexOf(area)));
@@ -302,13 +390,39 @@ function nameRow(name, right, second, area) {
   l1.appendChild($("span", "title", name || "(no channel)"));
   l1.appendChild($("span", "clock", right));
   row.appendChild(l1);
-  row.appendChild($("div", "l2", second));
+  const l2 = $("div", "l2");
+  if (second && second.nodeType) l2.appendChild(second); else l2.textContent = second;
+  row.appendChild(l2);
   return row;
 }
 
-// The area of a topic string: the report ships the full "area/subject", and
-// the hue belongs to the level the rest of the page colours by.
+// The two halves of a topic string: the report ships the full "area/subject",
+// the hue belongs to the level the rest of the page colours by, and the link
+// wants both. Cut at the FIRST slash, the same cut Go makes (SplitTopic), so a
+// subject holding a slash arrives whole.
 const topicArea = t => String(t || "").split("/")[0];
+const topicSub = t => {
+  const i = String(t || "").indexOf("/");
+  return i < 0 ? "" : String(t).slice(i + 1);
+};
+
+// topicPart is the second line of a channel row: its topic as a link, then
+// whatever else the line says. The link is on the topic and not on the row,
+// because the row is about the CHANNEL — and a channel is where the tree ends,
+// so it has no view of its own to lead to.
+function topicPart(topic, rest) {
+  const frag = document.createDocumentFragment();
+  const hash = topicHash(topicArea(topic), topicSub(topic));
+  if (hash) {
+    const a = $("a", "rlink", topic);
+    a.href = hash;
+    frag.appendChild(a);
+  } else {
+    frag.appendChild(document.createTextNode(topic || "unclear"));
+  }
+  if (rest) frag.appendChild(document.createTextNode(" · " + rest));
+  return frag;
+}
 
 function reportChannels(R) {
   const cs = rlist(R.chans);
@@ -319,11 +433,11 @@ function reportChannels(R) {
     (R.hasSubs ? ", and whether the export says you subscribe to them" : "") + "."));
   const stack = $("div", "stack");
   for (const c of cs) {
-    const bits = [c[RC_TOPIC] || "unclear", upto(c[RC_DUR])];
+    const bits = [upto(c[RC_DUR])];
     if (R.hasSubs) bits.push(c[RC_SUBBED] ? "subscribed" : "not subscribed");
     stack.appendChild(nameRow(D.chans[c[RC_CHAN]],
       c[RC_VIEWS].toLocaleString() + plural(" view", c[RC_VIEWS]),
-      bits.join(" · "), topicArea(c[RC_TOPIC])));
+      topicPart(c[RC_TOPIC], bits.join(" · ")), topicArea(c[RC_TOPIC])));
   }
   panel.appendChild(stack);
   return panel;
@@ -348,9 +462,11 @@ function reportSubs(R) {
   const stack = $("div", "stack");
   for (const s of subs) {
     const last = s[RS_LAST] >= 0 ? "last watched " + dayDate(s[RS_LAST]) : "never watched in this export";
+    // A subscription with no view has no topic either, and then the line is
+    // the sentence alone — there is nothing to link and nothing to name.
     stack.appendChild(nameRow(D.chans[s[RC_CHAN]],
       s[RC_VIEWS] ? s[RC_VIEWS].toLocaleString() + plural(" view", s[RC_VIEWS]) : "—",
-      (s[RC_TOPIC] ? s[RC_TOPIC] + " · " + upto(s[RC_DUR]) + " · " : "") + last,
+      s[RC_TOPIC] ? topicPart(s[RC_TOPIC], upto(s[RC_DUR]) + " · " + last) : last,
       topicArea(s[RC_TOPIC])));
   }
   panel.appendChild(stack);

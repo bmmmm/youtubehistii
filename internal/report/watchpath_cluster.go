@@ -203,9 +203,11 @@ function clusterLayout(node) {
 // ---- the view -----------------------------------------------------------
 
 // Absolute depth 1 is an area, 2 a subject: those two are addresses. A channel
-// is where the tree ends, so its circle is a shape and nothing else.
+// is where the tree ends, so its circle is a shape and nothing else. The URL
+// itself is topicHash's, in the shell — every link into this tree is built in
+// one place, or two of them eventually encode a name differently.
 const clusterHash = p => (p.length >= 1 && p.length <= 2
-  ? "#/topics/" + p.map(encodeURIComponent).join("/") : null);
+  ? topicHash(p[0], p[1] || "") : null);
 
 function renderClusters(root, area, sub) {
   const tree = D.clusters || [];
@@ -235,6 +237,21 @@ function renderClusters(root, area, sub) {
     share(node[T_VIEWS], allV) + " of all " + allV.toLocaleString() + " · " +
     atMost(node[T_DUR]) + " · " +
     kids.length.toLocaleString() + " " + plural(kind, kids.length) + " inside"));
+
+  // The tree answers WHAT was watched; the list answers WHICH. Only a focused
+  // node has something to hand over — the root of the tree is the whole list
+  // and already sits in the bar above. The count is the node's own, and it is
+  // the same number the list will draw: both count every view under the name,
+  // overlap included, off the same rows.
+  if (path.length) {
+    const p = $("p", "muted");
+    const a = $("a", "rlink",
+      "list the " + node[T_VIEWS].toLocaleString() + plural(" view", node[T_VIEWS]) +
+      " behind " + rootName + " →");
+    a.href = "#/list/" + path.map(encodeURIComponent).join("/");
+    p.appendChild(a);
+    root.appendChild(p);
+  }
 
   if (!kids.length) {
     root.appendChild($("p", "muted", "Nothing sits below this one."));

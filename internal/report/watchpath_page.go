@@ -161,6 +161,13 @@ a.tile:hover { background: var(--card2); outline: 1px solid var(--line); }
 .clock { font-variant-numeric: tabular-nums; font-size: .75rem; color: var(--muted); flex-shrink: 0; }
 .l2 { font-size: .72rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .area { color: var(--area); }
+/* The topic on a card is an address, so it is drawn as one. Dotted and not
+   solid: the whole second line is muted supporting text, and a solid
+   underline in there reads as emphasis on the one word it is under. */
+a.area { text-decoration: underline dotted; text-underline-offset: 2px; }
+a.area:hover { text-decoration-style: solid; }
+a.area:focus-visible { outline: 2px solid var(--bar); outline-offset: 1px;
+  border-radius: .15rem; }
 .mode { display: inline-block; padding: 0 .4rem; border-radius: .6rem; font-size: .68rem; color: #fff; }
 .mode.consume { background: var(--consume); } .mode.learn { background: var(--learn); }
 .mode.mixed { background: var(--mixed); } .mode.unclear { background: var(--unclear); }
@@ -205,7 +212,27 @@ button.rrow:hover, button.rrow:focus-visible { background: var(--card); }
 .rsubs { margin: 0 0 .4rem 1.3rem; border-left: 1px solid var(--line); }
 .rsubs[hidden] { display: none; }
 .rlink { color: var(--bar); }
+a.rlink { text-decoration: underline; text-underline-offset: 2px; }
+a.rlink:focus-visible { outline: 2px solid var(--bar); outline-offset: 2px;
+  border-radius: .15rem; }
 .runcl { margin: .5rem 0 0; padding-left: 1.1rem; font-size: .85rem; }
+
+/* A row that leads somewhere has to say so BEFORE it is touched — the same
+   rule the drawn controls follow further down, and the reason neither a
+   cursor change nor a hover tint counts on its own: both are invisible to
+   anyone who is not already pointing at the row. So a linked row carries an
+   arrow that is on screen at rest.
+   The arrow is a separate element rather than the row itself becoming a link
+   in every case, because a row with subjects under it is already a button:
+   opening it and travelling to it are two different actions, and interactive
+   content may not nest inside a button anyway. */
+.rline { display: flex; align-items: center; gap: .2rem; }
+.rline > .rrow { flex: 1; min-width: 0; }
+a.rrow { text-decoration: none; }
+a.rrow:hover, a.rrow:focus-visible { background: var(--card); }
+.rgo { flex-shrink: 0; color: var(--bar); font-size: .8rem; text-decoration: none;
+  padding: 0 .2rem; }
+a.rgo:hover, a.rgo:focus-visible { text-decoration: underline; }
 /* On a phone the bar is the first thing that has to go: the number next to it
    says the same, and a 3 rem bar says nothing. */
 @media (max-width: 30rem) { .rbar { display: none; } .rnum { width: 4rem; } }
@@ -226,6 +253,11 @@ circle.hit:hover:not([aria-pressed="true"]),
 circle.hit:focus-visible:not([aria-pressed="true"]) {
   stroke: var(--fg); stroke-width: 2; stroke-opacity: .55;
 }
+/* The report's month columns are hit by an invisible zone drawn OVER the
+   stacked bars, so the shared opacity fade has nothing to fade. It tints
+   instead — faint enough that the bars keep their colours through it, which
+   a solid fill would take away. */
+rect.mhit:hover { fill: var(--fg); fill-opacity: .09; }
 
 /* The graph's picker and its clear button. The picker is one focus stop that
    holds the whole selection; the button only exists while something is
@@ -323,6 +355,17 @@ function areaName(i) {
   return D.areas[i] || "unclear";
 }
 
+// topicHash is the address of an area or of a subject inside it — the one
+// place on the page that builds a link into the tree, so the report, the cards
+// and the tree itself cannot drift apart on how a name becomes a URL. Names
+// are URI-encoded because a subject may hold a slash. An area with no name is
+// nowhere in the tree, and gets no link rather than a link into the root.
+function topicHash(area, sub) {
+  if (!area) return null;
+  return "#/topics/" + encodeURIComponent(area) +
+    (sub ? "/" + encodeURIComponent(sub) : "");
+}
+
 // ---- time formatting ---------------------------------------------------
 
 const pad = n => String(n).padStart(2, "0");
@@ -392,8 +435,18 @@ function viewCard(r) {
 
   const l2 = $("div", "l2");
   const bits = [];
-  bits.push('<span class="area">' + esc(areaName(r[R_AREA])) +
-    (D.subs[r[R_SUB]] ? " / " + esc(D.subs[r[R_SUB]]) : "") + "</span>");
+  // The topic a view carries is an address, so it travels as a link. Inside
+  // the card, never the card itself: a card is one video, and a video has no
+  // view of its own to lead to — while its topic has two, the tree and the
+  // list cut down to it. The hash is built from encodeURIComponent output and
+  // a fixed prefix, so it cannot carry a quote out of the attribute; the name
+  // beside it still goes through esc(), which is rule two of this page.
+  const tHash = topicHash(areaName(r[R_AREA]), D.subs[r[R_SUB]]);
+  const tText = esc(areaName(r[R_AREA])) +
+    (D.subs[r[R_SUB]] ? " / " + esc(D.subs[r[R_SUB]]) : "");
+  bits.push(tHash
+    ? '<a class="area" href="' + tHash + '">' + tText + "</a>"
+    : '<span class="area">' + tText + "</span>");
   if (D.chans[r[R_CHAN]]) bits.push(esc(D.chans[r[R_CHAN]]));
   if (r[R_DUR] > 0) bits.push(clip(r[R_DUR]));
   bits.push('<span class="mode ' + D.modes[r[R_MODE]] + '">' + D.modes[r[R_MODE]] + "</span>");
@@ -484,27 +537,95 @@ const pageTail = `<script>
 // ---- level 4: every view as one list ----------------------------------
 
 // The list keeps its own scroll offset, because coming back to it from a
-// session is a return, not a fresh visit.
-let listScroll = 0;
+// session is a return, not a fresh visit. Keyed by the filter: an offset
+// measured in the whole list means nothing in a list of twelve views, and one
+// shared counter would hand the way back to "all views" a position that was
+// clamped away while a subject was showing.
+const listScroll = new Map();
 
-function renderList(root) {
+// NO_SUBJECT is what Go calls the empty subject bucket in the topic tree
+// (NoSubject in watchpath.go). The same view carries the empty string on the
+// timeline, so a link out of the tree has to fold the two names into one
+// index — the tree and the list would otherwise disagree about a bucket that
+// is one bucket.
+const NO_SUBJECT = "(no subject)";
+
+// listRows turns an area and a subject name into the row indices the list
+// draws, and it is the only filter this view has: the address IS the state,
+// so there is nothing to reset and nothing to get out of step with the hash.
+//
+// The session headers come along, so a filtered list is still a timeline and
+// not a heap of cards — with the count of what actually matched under each,
+// because a header describes the WHOLE sitting and would otherwise promise
+// rows that are not there.
+//
+// The unfiltered case builds the identity index rather than taking a second
+// path through the drawing below: one array of row numbers is cheap next to
+// the payload it indexes, and two ways of finding row i is how the two drift.
+function listRows(area, sub) {
+  const out = { idx: [], hits: null };
+  if (!area) {
+    for (let i = 0; i < D.rows.length; i++) out.idx.push(i);
+    return out;
+  }
+  out.hits = new Map();
+  const ai = D.areas.indexOf(area);
+  if (ai < 0) return out;
+  let si = -1;
+  if (sub) {
+    si = D.subs.indexOf(sub);
+    if (si < 0 && sub === NO_SUBJECT) si = 0;
+    if (si < 0) return out;
+  }
+  let head = -1, n = 0;
+  for (let i = 0; i < D.rows.length; i++) {
+    const r = D.rows[i];
+    if (r[0] === 0) { head = i; n = 0; continue; }
+    if (r[R_AREA] !== ai) continue;
+    if (si >= 0 && r[R_SUB] !== si) continue;
+    if (!n && head >= 0) out.idx.push(head);
+    out.idx.push(i);
+    out.hits.set(head, ++n);
+  }
+  return out;
+}
+
+function renderList(root, area, sub) {
+  const sel = listRows(area, sub);
+  const label = sub ? area + " / " + sub : area;
+  // The key is the filter itself, so every cut keeps its own place in the
+  // list and the whole list keeps the one it had.
+  const key = sel.hits ? area + "\n" + (sub || "") : "";
+
+  if (sel.hits) {
+    root.appendChild($("p", "muted", sel.idx.length
+      ? "Only the views of " + label + ", newest first, in the sittings they " +
+        "were watched in. A sitting line still describes the whole sitting; the " +
+        "count after it says how many of its videos are listed here."
+      : "No view on this timeline carries " + label + "."));
+  }
+
   const path = $("div"); path.id = "path";
   const spacer = $("div"); spacer.id = "spacer";
   path.appendChild(spacer);
   root.appendChild(path);
-  spacer.style.height = (D.rows.length * RH) + "px";
+  spacer.style.height = (sel.idx.length * RH) + "px";
   path.style.setProperty("--rh", RH + "px");
 
-  function rowEl(r, i) {
+  function rowEl(i) {
+    const ri = sel.idx[i];
+    const r = D.rows[ri];
     const el = $("div", "row");
     el.style.top = (i * RH) + "px";
     if (r[0] === 0) {
       const wrap = $("div", "sess");
       const when = $("span", "when", stamp(r[R_TS]));
-      wrap.appendChild(hit(when, "#/session/" + rowToSession.get(i), "open this sitting"));
+      wrap.appendChild(hit(when, "#/session/" + rowToSession.get(ri), "open this sitting"));
       // A session row and a D.sess entry carry span, count and gap at the
       // same offsets, which is what lets one formatter serve both.
-      wrap.appendChild($("span", "gap", sessionLine(r)));
+      const n = sel.hits ? sel.hits.get(ri) : 0;
+      wrap.appendChild($("span", "gap", sessionLine(r) +
+        (n ? " · " + n + " of them listed here" : "")));
       el.appendChild(wrap);
       return el;
     }
@@ -523,14 +644,14 @@ function renderList(root) {
   function draw() {
     const top = scrollY - path.offsetTop;
     const from = Math.max(0, Math.floor(top / RH) - OVERSCAN);
-    const to = Math.min(D.rows.length - 1, Math.ceil((top + innerHeight) / RH) + OVERSCAN);
+    const to = Math.min(sel.idx.length - 1, Math.ceil((top + innerHeight) / RH) + OVERSCAN);
     if (from === first && to === last) return;
     for (const [i, el] of live) {
       if (i < from || i > to) { el.remove(); live.delete(i); }
     }
     for (let i = from; i <= to; i++) {
       if (live.has(i)) continue;
-      const el = rowEl(D.rows[i], i);
+      const el = rowEl(i);
       path.appendChild(el);
       live.set(i, el);
     }
@@ -542,14 +663,14 @@ function renderList(root) {
   // there means one frame of empty space on every fast scroll.
   let queued = false;
   function schedule() {
-    listScroll = scrollY;
+    listScroll.set(key, scrollY);
     if (queued) return;
     queued = true;
     requestAnimationFrame(() => { queued = false; draw(); });
   }
   addEventListener("scroll", schedule, { passive: true });
   addEventListener("resize", schedule);
-  scrollTo(0, listScroll);
+  scrollTo(0, listScroll.get(key) || 0);
   draw();
 
   return () => {
@@ -666,6 +787,29 @@ function route() {
     return;
   }
   if (parts[0] === "list") {
+    // The list takes the same address the topic tree does, one level down:
+    // #/list/<area>[/<subject>] is that topic's views on the timeline. Names
+    // again, not indices, for the reason given above — and the filter lives
+    // nowhere but in this hash, so the back button undoes it like any other
+    // step and nothing on screen has to hold it.
+    const area = parts[1] ? decodeURIComponent(parts[1]) : "";
+    const sub = parts[2] ? decodeURIComponent(parts[2]) : "";
+    if (area) {
+      const trail = [{ text: "overview", hash: "/" },
+                     { text: "topics", hash: "/topics" },
+                     { text: area, hash: "/topics/" + encodeURIComponent(area) }];
+      if (sub) {
+        trail.push({ text: sub, hash: "/topics/" + encodeURIComponent(area) +
+          "/" + encodeURIComponent(sub) });
+      }
+      trail.push({ text: "its views" });
+      // No "here" for a filtered list: the unfiltered one then stays in the
+      // bar on the right, which is the way back OUT of the filter and saves
+      // it a control of its own.
+      crumbs(trail);
+      teardown = renderList(viewEl, area, sub) || null;
+      return;
+    }
     crumbs([{ text: "overview", hash: "/" }, { text: "all views" }], "list");
     teardown = renderList(viewEl) || null;
     return;
