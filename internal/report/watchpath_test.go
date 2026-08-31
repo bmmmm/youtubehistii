@@ -550,8 +550,15 @@ func TestPathDataInternsRepeats(t *testing.T) {
 		t.Errorf("areas = %v, hues = %v", d.Areas, d.AreaHues)
 	}
 	// A stable hue per name is what keeps colours from moving between runs.
-	if areaHue("music") != areaHue("music") || areaHue("music") == areaHue("sports") {
-		t.Error("area hues must be stable per name and differ between names")
+	// Pinned to the concrete FNV values on purpose: areaHue is pure, so
+	// comparing it against itself proves nothing (staticcheck SA4000 caught
+	// exactly that) — only a fixed number turns red when the hash changes,
+	// and a hash change moves every user's colours.
+	if h := areaHue("music"); h != 276 {
+		t.Errorf("areaHue(music) = %d, want the pinned 276 — changing the hash recolours every page", h)
+	}
+	if areaHue("music") == areaHue("sports") {
+		t.Error("area hues must differ between names")
 	}
 }
 

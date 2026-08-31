@@ -30,5 +30,9 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
+      # Pinned, not @latest: a linter that updates itself decides on its own
+      # day when the build goes red. It gates only because it read 0 findings
+      # on the whole tree first (the one real hit, SA4000, is fixed).
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - run: go test ./...
       - run: go build .
