@@ -70,6 +70,7 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nam
 			cacheDir = ""
 		}
 	}
+	cache := hashCache[nameEntry]{dir: cacheDir}
 	// slugOr turns a model's raw answer into a name, keeping the cluster's
 	// strongest member as the floor. Slugging stays a code decision that a
 	// later change may revise; the cached reply is the model's words.
@@ -97,7 +98,9 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nam
 			log.event("name-fallback", map[string]any{"cluster": taxonomy.FallbackName(c), "error": err.Error()})
 			return taxonomy.FallbackName(c)
 		}
-		writeNameCache(cacheDir, client.Model, system, user, reply)
+		// A failed cache write is dropped: the run has the name it needs,
+		// and the next one simply asks the model again.
+		_ = cache.write(nameEntry{Reply: reply}, client.Model, system, user)
 		return slugOr(reply, c)
 	}
 
@@ -120,13 +123,13 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nam
 		var miss []int
 		for i, c := range cs {
 			system, user := taxonomy.NameSinglePrompt(c, kind)
-			reply, cached := readNameCache(cacheDir, client.Model, system, user)
-			if !cached {
+			e, cached := cache.read(client.Model, system, user)
+			if !cached || e.Reply == "" {
 				miss = append(miss, i)
 				continue
 			}
 			atomic.AddInt64(&ks.Hits, 1)
-			out[i] = slugOr(reply, c)
+			out[i] = slugOr(e.Reply, c)
 		}
 		atomic.AddInt64(&ks.Misses, int64(len(miss)))
 
@@ -179,7 +182,7 @@ func newNamer(client *omlx.Client, noLLM bool, log *runLog, cacheDir string, nam
 				// Stored under the SINGLE prompt, so the next run finds it
 				// however this one happened to ask.
 				s, u := taxonomy.NameSinglePrompt(cs[i], kind)
-				writeNameCache(cacheDir, client.Model, s, u, names[n])
+				_ = cache.write(nameEntry{Reply: names[n]}, client.Model, s, u)
 			}
 		}
 		return out

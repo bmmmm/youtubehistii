@@ -16,6 +16,8 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/bmmmm/youtubehistii/internal/fscache"
 )
 
 // Meta is the pruned per-video metadata we keep — not the full yt-dlp dump.
@@ -92,38 +94,21 @@ func (c Cache) Has(id string) bool {
 	return err == nil
 }
 
-// Write stores one entry atomically (temp file + rename). A plain write would
-// leave truncated JSON behind on a crash, and that is worse than no entry at
-// all: Has() would report the video as cached so it never gets refetched, and
-// ReadAll would fail the WHOLE cache on the one unparseable file.
+// Write stores one entry atomically (temp file + rename, via fscache). A
+// plain write would leave truncated JSON behind on a crash, and that is
+// worse than no entry at all: Has() would report the video as cached so it
+// never gets refetched, and ReadAll would fail the WHOLE cache on the one
+// unparseable file.
 func (c Cache) Write(m Meta) error {
 	p, err := c.path(m.ID)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(c.Dir, ".tmp-*")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := tmp.Write(append(b, '\n')); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp.Name(), p)
+	return fscache.WriteFile(p, append(b, '\n'))
 }
 
 // IDs returns every cached video ID from a single directory read. Callers that

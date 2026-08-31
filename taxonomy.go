@@ -3,9 +3,6 @@
 package main
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -302,13 +299,14 @@ func probeRun(client *omlx.Client, embedModel string, p paths) error {
 // embedLabels returns one vector per label, reading data/cache/embed first
 // and asking the server only for misses, in batches of 32.
 func embedLabels(client *omlx.Client, model string, labels []taxonomy.Label, cacheDir string) ([][]float32, int, error) {
+	cache := hashCache[embedEntry]{dir: cacheDir}
 	vecs := make([][]float32, len(labels))
 	var missIdx []int
 	var missTexts []string
 	for i, l := range labels {
 		text := l.EmbedText()
-		if v, ok := readEmbedCache(cacheDir, model, text); ok {
-			vecs[i] = v
+		if e, ok := cache.read(model, text); ok && len(e.Vector) > 0 {
+			vecs[i] = e.Vector
 			continue
 		}
 		missIdx = append(missIdx, i)
@@ -323,7 +321,7 @@ func embedLabels(client *omlx.Client, model string, labels []taxonomy.Label, cac
 		for n, v := range out {
 			i := missIdx[off+n]
 			vecs[i] = v
-			if err := writeEmbedCache(cacheDir, model, missTexts[off+n], v); err != nil {
+			if err := cache.write(embedEntry{Vector: v}, model, missTexts[off+n]); err != nil {
 				return nil, 0, err
 			}
 		}
@@ -332,77 +330,6 @@ func embedLabels(client *omlx.Client, model string, labels []taxonomy.Label, cac
 		}
 	}
 	return vecs, len(missIdx), nil
-}
-
-func embedCachePath(dir, model, text string) string {
-	sum := sha256.Sum256([]byte(model + "\x00" + text))
-	return filepath.Join(dir, hex.EncodeToString(sum[:12])+".json")
-}
-
-func readEmbedCache(dir, model, text string) ([]float32, bool) {
-	b, err := os.ReadFile(embedCachePath(dir, model, text))
-	if err != nil {
-		return nil, false
-	}
-	var e struct {
-		Vector []float32 `json:"vector"`
-	}
-	if json.Unmarshal(b, &e) != nil || len(e.Vector) == 0 {
-		return nil, false
-	}
-	return e.Vector, true
-}
-
-func writeEmbedCache(dir, model, text string, v []float32) error {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	b, err := json.Marshal(struct {
-		Vector []float32 `json:"vector"`
-	}{v})
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(embedCachePath(dir, model, text), b, 0o644)
-}
-
-// nameCachePath keys a naming reply by the whole prompt plus the model that
-// answered it — the same shape as embedCachePath, one directory over.
-func nameCachePath(dir, model, system, user string) string {
-	sum := sha256.Sum256([]byte(model + "\x00" + system + "\x00" + user))
-	return filepath.Join(dir, hex.EncodeToString(sum[:12])+".json")
-}
-
-func readNameCache(dir, model, system, user string) (string, bool) {
-	if dir == "" {
-		return "", false
-	}
-	b, err := os.ReadFile(nameCachePath(dir, model, system, user))
-	if err != nil {
-		return "", false
-	}
-	var e struct {
-		Reply string `json:"reply"`
-	}
-	if json.Unmarshal(b, &e) != nil || e.Reply == "" {
-		return "", false
-	}
-	return e.Reply, true
-}
-
-// writeNameCache drops a failed write: the run has the name it needs, and the
-// next one simply asks the model again.
-func writeNameCache(dir, model, system, user, reply string) {
-	if dir == "" {
-		return
-	}
-	b, err := json.Marshal(struct {
-		Reply string `json:"reply"`
-	}{reply})
-	if err != nil {
-		return
-	}
-	os.WriteFile(nameCachePath(dir, model, system, user), b, 0o644)
 }
 
 // blockSecondSplit gives every name one automatic split per run. The pieces

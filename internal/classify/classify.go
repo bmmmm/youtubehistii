@@ -7,7 +7,6 @@ package classify
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -15,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmmmm/youtubehistii/internal/fscache"
 	"github.com/bmmmm/youtubehistii/internal/rules"
 )
 
@@ -403,28 +403,20 @@ func (c Cache) Read(id string) (LLMVerdict, bool) {
 	if err != nil {
 		return LLMVerdict{}, false
 	}
-	b, err := os.ReadFile(p)
-	if err != nil {
-		return LLMVerdict{}, false
-	}
-	var v LLMVerdict
-	if err := json.Unmarshal(b, &v); err != nil {
-		return LLMVerdict{}, false
-	}
-	return v, true
+	return fscache.ReadJSON[LLMVerdict](p)
 }
 
+// Write stores one verdict atomically (fscache carries the why). This cache
+// used to write in place, and only never got hurt by it because a crashed
+// classify run was always rerun by hand before anything read the cache.
 func (c Cache) Write(id string, v LLMVerdict) error {
 	p, err := c.path(id)
 	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(c.Dir, 0o755); err != nil {
 		return err
 	}
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(p, append(b, '\n'), 0o644)
+	return fscache.WriteFile(p, append(b, '\n'))
 }
