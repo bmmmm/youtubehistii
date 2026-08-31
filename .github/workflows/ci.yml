@@ -36,3 +36,20 @@ jobs:
       - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
       - run: go test ./...
       - run: go build .
+      # The Go tests build the page as a STRING and never execute a line of
+      # its JavaScript. pagecheck does, and it caught a syntax error that
+      # kills the page before its first line. It could only ever run by hand,
+      # because the real page is somebody's watch history and gitignored — so
+      # CI renders an invented one instead. Both are the same 77 checks.
+      #
+      # The fixture is sized past 300 chains and 300 days on purpose: the
+      # virtual list once capped its rows there, and a smaller fixture passes
+      # whether the cap is back or not (measured — putting the cap back left
+      # a 45-chain fixture green and turned the 620-chain one red).
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: pagecheck (runs the page's own JavaScript)
+        run: |
+          go run ./tools/pagefixture > page.html
+          node tools/pagecheck/pagecheck.js page.html

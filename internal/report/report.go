@@ -248,7 +248,12 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 		}
 		st.Channels = append(st.Channels, *c)
 	}
-	sort.Slice(st.Channels, func(i, j int) bool { return st.Channels[i].Views > st.Channels[j].Views })
+	// Name AND id as tie-break, because the map above is keyed by both: two
+	// channels can share a name, and ordering them by name alone would still
+	// leave the pair free to swap. Views alone left it free to swap on every
+	// run — the map iteration decided, and two runs on identical data wrote
+	// different pages (found 2026-08-31 by rendering the same fixture twice).
+	sortByViews(st.Channels, func(c ChannelAgg) (int, string) { return c.Views, c.Name + "\x00" + c.ID })
 
 	for _, s := range subs {
 		row := SubRow{Title: s.Title, ChannelID: s.ChannelID}
@@ -270,7 +275,9 @@ func Aggregate(rows []classify.Verdict, subs []takeout.Subscription) *Stats {
 	for name, n := range unclearCh {
 		ncs = append(ncs, nc{name, n})
 	}
-	sort.Slice(ncs, func(i, j int) bool { return ncs[i].n > ncs[j].n })
+	// Same rule, and here it decides more than an order: the list is cut at
+	// 15, so an unstable tie-break changes WHICH names the report shows.
+	sortByViews(ncs, func(c nc) (int, string) { return c.n, c.name })
 	for i := 0; i < len(ncs) && i < 15; i++ {
 		st.UnclearNames = append(st.UnclearNames, ncs[i].name)
 	}

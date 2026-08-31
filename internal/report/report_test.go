@@ -4,6 +4,8 @@ package report
 
 import (
 	"bytes"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -187,5 +189,55 @@ func TestGoneByCountsReasons(t *testing.T) {
 	}
 	if !strings.Contains(out, "1 of those are locked") {
 		t.Errorf("render lost the locked hint:\n%s", out)
+	}
+}
+
+// TestTiedRowsKeepTheirOrder pins the tie-break on the two lists Aggregate
+// fills from a MAP. Go randomises map iteration per range, so equal counts
+// used to come out in a different order every call: two watchpath runs on
+// identical data wrote different pages, and the unclear-channel list is cut
+// at 15, so the order decided WHICH names a report showed. Found by
+// rendering the same fixture twice and diffing (2026-08-31).
+//
+// Twenty repeats, not two: one range can shuffle back into place by chance,
+// twenty in a row cannot.
+func TestTiedRowsKeepTheirOrder(t *testing.T) {
+	var rows []classify.Verdict
+	at := time.Date(2024, 3, 1, 12, 0, 0, 0, time.UTC)
+	for i := 0; i < 20; i++ {
+		// Every channel gets exactly one classified and one unclear view, so
+		// every count is tied with every other and only the tie-break can
+		// decide. Two of them share a name and differ by id — the pair the
+		// name alone cannot separate.
+		name := fmt.Sprintf("channel %02d", i)
+		if i == 19 {
+			name = "channel 18"
+		}
+		rows = append(rows,
+			classify.Verdict{VideoID: fmt.Sprintf("v%02da", i), Title: "t", Channel: name,
+				ChannelID: fmt.Sprintf("id%02d", i), WatchedAt: at, Topic: "gaming/rust", Mode: "consume"},
+			classify.Verdict{VideoID: fmt.Sprintf("v%02db", i), Title: "t", Channel: name,
+				ChannelID: fmt.Sprintf("id%02d", i), WatchedAt: at, Topic: "unclear"})
+	}
+
+	order := func(st *Stats) ([]string, []string) {
+		var chans []string
+		for _, c := range st.Channels {
+			chans = append(chans, c.Name+"/"+c.ID)
+		}
+		return chans, append([]string(nil), st.UnclearNames...)
+	}
+	wantChans, wantUnclear := order(Aggregate(rows, nil))
+	if len(wantChans) < 2 || len(wantUnclear) == 0 {
+		t.Fatalf("fixture built nothing to order: %d channels, %d unclear names", len(wantChans), len(wantUnclear))
+	}
+	for i := 0; i < 20; i++ {
+		gotChans, gotUnclear := order(Aggregate(rows, nil))
+		if !reflect.DeepEqual(gotChans, wantChans) {
+			t.Fatalf("channel order changed on run %d:\n %v\n %v", i, wantChans, gotChans)
+		}
+		if !reflect.DeepEqual(gotUnclear, wantUnclear) {
+			t.Fatalf("unclear-name selection changed on run %d:\n %v\n %v", i, wantUnclear, gotUnclear)
+		}
 	}
 }
