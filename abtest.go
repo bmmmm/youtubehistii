@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -180,31 +181,50 @@ func cmdABTest(args []string) error {
 	wins := abJudge(cj, r.items, va, vb, disagree, *batch)
 	fmt.Printf("\nreferee %s on %d disagreements: A %d, B %d, neither %d, unparsed %d\n",
 		*judge, len(disagree), wins.a, wins.b, wins.neither, wins.unparsed)
-	// The verdict the caller came for, stated as a rule and not as a vibe:
-	// the candidate has to WIN the disagreements, not merely differ.
-	//
-	// The quorum is the load-bearing part. A referee whose replies do not
-	// parse still produces a ratio, and a ratio computed from 7 of 61 reads
-	// exactly like one computed from 61 of 61 — that is how a broken
-	// measurement gets shipped as a finding. Below half decided, this refuses
-	// to conclude and says which half is missing.
-	decided := wins.a + wins.b
+	fmt.Print(abVerdict(wins, len(disagree)))
+	return nil
+}
+
+// abVerdict is the sentence the caller came for, and it has two chances to
+// refuse. Both were added after it stated something untrue about real data.
+//
+//   - Quorum. A referee whose replies do not parse still produces a ratio,
+//     and "86 % (6 of 7)" out of 61 disagreements reads exactly like a result
+//     computed from all 61. Below half decided there is no verdict at all.
+//   - Noise. 20 wins against 16 on 36 decided is a coin flip: under a fair
+//     coin the difference has standard deviation sqrt(n), so a margin inside
+//     2*sqrt(n) says nothing about the models and everything about the sample
+//     size. Naming a winner there is how a 5-hour re-run gets justified by
+//     four votes.
+//
+// Pure, so its behaviour is a test and not a 6-minute run against a server.
+func abVerdict(w abWins, disagreements int) string {
+	decided := w.a + w.b
 	switch {
 	case decided == 0:
-		fmt.Println("verdict: the referee decided nothing — the comparison is inconclusive")
-	case decided*2 < len(disagree):
-		fmt.Printf("verdict: NONE — the referee only decided %d of %d disagreements (%.0f %%).\n"+
+		return "verdict: the referee decided nothing — the comparison is inconclusive\n"
+	case decided*2 < disagreements:
+		return fmt.Sprintf("verdict: NONE — the referee only decided %d of %d disagreements (%.0f %%).\n"+
 			"  Its replies did not fit the expected shape (see the warnings above), so any\n"+
 			"  ratio from them would be noise. Try another -judge model.\n",
-			decided, len(disagree), pct(decided, len(disagree)))
-	case wins.b > wins.a:
-		fmt.Printf("verdict: the candidate wins %.0f %% of the decided disagreements (%d of %d)\n",
-			pct(wins.b, decided), wins.b, decided)
-	default:
-		fmt.Printf("verdict: the candidate does NOT win (%d of %d decided) — the re-run is not worth its five hours\n",
-			wins.b, decided)
+			decided, disagreements, pct(decided, disagreements))
 	}
-	return nil
+	margin := w.a - w.b
+	if margin < 0 {
+		margin = -margin
+	}
+	if float64(margin) < 2*math.Sqrt(float64(decided)) {
+		return fmt.Sprintf("verdict: TOO CLOSE — %d/%d on %d decided is inside the noise band of a\n"+
+			"  fair coin (a margin under %.0f proves nothing at this sample size). The models\n"+
+			"  differ, neither is better. Raise -n if the question is worth more requests.\n",
+			w.b, w.a, decided, 2*math.Sqrt(float64(decided)))
+	}
+	if w.b > w.a {
+		return fmt.Sprintf("verdict: the candidate wins %.0f %% of the decided disagreements (%d of %d)\n",
+			pct(w.b, decided), w.b, decided)
+	}
+	return fmt.Sprintf("verdict: the candidate LOSES (%d of %d decided) — the re-run is not worth its hours\n",
+		w.b, decided)
 }
 
 // abSample picks the videos to compare: ids sorted, then a fixed stride, so
@@ -220,13 +240,19 @@ func abSample(needLLM []string, items map[string]classify.Item, n int) []string 
 		}
 	}
 	sort.Strings(usable)
-	if n <= 0 || n >= len(usable) {
-		return usable
+	return abSampleIDs(usable, n)
+}
+
+// abSampleIDs is the stride itself, kept pure so a test can hold it to the
+// property the comparison rests on: the same ids in, the same sample out.
+func abSampleIDs(sorted []string, n int) []string {
+	if n <= 0 || n >= len(sorted) {
+		return sorted
 	}
-	stride := float64(len(usable)) / float64(n)
+	stride := float64(len(sorted)) / float64(n)
 	out := make([]string, 0, n)
 	for i := 0; i < n; i++ {
-		out = append(out, usable[int(float64(i)*stride)])
+		out = append(out, sorted[int(float64(i)*stride)])
 	}
 	return out
 }
@@ -342,21 +368,8 @@ func abJudge(client *omlx.Client, items map[string]classify.Item,
 			fmt.Fprintf(os.Stderr, "  referee request failed: %v\n", err)
 			continue
 		}
-		seen := map[int]bool{}
-		for _, line := range strings.Split(reply, "\n") {
-			f := strings.Fields(line)
-			if len(f) != 2 {
-				continue
-			}
-			nth, err1 := strconv.Atoi(strings.TrimSuffix(f[0], "."))
-			pick, err2 := strconv.Atoi(f[1])
-			if err1 != nil || err2 != nil || nth < 1 || nth > len(ids) || pick < 0 || pick > 2 {
-				continue
-			}
-			if seen[nth] {
-				continue
-			}
-			seen[nth] = true
+		seen := abReadPicks(reply, len(ids))
+		for nth, pick := range seen {
 			switch {
 			case pick == 0:
 				w.neither++
@@ -400,6 +413,57 @@ func writeABItem(u *strings.Builder, item classify.Item, indent string) {
 		}
 		fmt.Fprintf(u, "%screator tags: %s\n", indent, strings.Join(tags, ", "))
 	}
+}
+
+// abReadPicks turns a referee reply into item number -> pick.
+//
+// The numbered form ("<n> <pick>") is what the prompt asks for and what the
+// Qwen models produce. gemma-4-26b answers the same content WITHOUT numbering
+// its lines — 20 lines of "<something> <pick>" whose first column is not an
+// index. Read strictly, that reply looks like twenty duplicates of item 1 and
+// item 2, and 18 of 20 real answers get thrown away as unreadable: the
+// referee was right, the parser was wrong.
+//
+// So: if the first column is a permutation of 1..n, believe it. Otherwise, if
+// the reply has exactly n candidate lines and every pick is in range, read it
+// POSITIONALLY. Both guards have to hold — a reply with a missing line would
+// shift every answer onto the wrong video, and that is worse than reporting
+// nothing.
+func abReadPicks(reply string, n int) map[int]int {
+	type row struct{ first, pick int }
+	var rows []row
+	for _, line := range strings.Split(reply, "\n") {
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			continue
+		}
+		first, err1 := strconv.Atoi(strings.TrimSuffix(f[0], "."))
+		pick, err2 := strconv.Atoi(f[1])
+		if err1 != nil || err2 != nil || pick < 0 || pick > 2 {
+			continue
+		}
+		rows = append(rows, row{first, pick})
+	}
+
+	numbered := make(map[int]int, len(rows))
+	for _, r := range rows {
+		if r.first >= 1 && r.first <= n {
+			if _, dup := numbered[r.first]; !dup {
+				numbered[r.first] = r.pick
+			}
+		}
+	}
+	if len(numbered) == n {
+		return numbered
+	}
+	if len(rows) == n {
+		positional := make(map[int]int, n)
+		for i, r := range rows {
+			positional[i+1] = r.pick
+		}
+		return positional
+	}
+	return numbered
 }
 
 func abTruncate(s string, n int) string {
