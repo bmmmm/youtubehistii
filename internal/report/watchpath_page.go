@@ -326,8 +326,14 @@ const pageBody = `<body>
 <p class="muted" id="head"></p>
 <nav id="crumbs"></nav>
 
+<!-- Closed, but announced. A caveat may fold away; the legend under it is
+     the page's vocabulary — "chain", "held you", "most unusual" are not
+     guessable — and a reader who wants it has to know it is there. Nine
+     lines of glossary pinned open above every view would be noise on every
+     visit after the first, so the summary carries the second sentence
+     instead: the caveat stays one line, the capability stops hiding. -->
 <details class="note">
-<summary>Takeout logs when a video was STARTED — nothing else.</summary>
+<summary>Takeout logs when a video was STARTED — nothing else. Open for what each label means.</summary>
 No end, no watch time, no device. Everything on this page is derived from the
 gap to the next start, and every gap has two readings: the video was abandoned,
 or it kept playing while something else was started. The labels mark what the
