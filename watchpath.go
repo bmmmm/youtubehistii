@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
+	"github.com/bmmmm/youtubehistii/internal/omlx"
 	"github.com/bmmmm/youtubehistii/internal/report"
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
@@ -22,6 +23,8 @@ import (
 func cmdWatchPath(args []string) error {
 	fs, dataDir := newFlagSet("watchpath")
 	useTaxonomy := fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path")
+	rulesPath := fs.String("rules", "", "rules file — only read for the chat model behind -label-holes")
+	labelHolesN := fs.Int("label-holes", 0, "ask the chat model for a short name for the N deepest rabbit holes (0 = off; replies are cached, a rerun asks nothing)")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -47,7 +50,21 @@ func cmdWatchPath(args []string) error {
 		return err
 	}
 	htmlPath := filepath.Join(p.outDir(), "watchpath.html")
-	html, err := report.RenderWatchPath(path, st, time.Now())
+
+	// The labels are the one part of this command that can talk to a server,
+	// and the one part whose absence changes nothing structural: without
+	// them the page names its chains after their depth and area, which is
+	// what it did before they existed.
+	var opts report.WatchPathOpts
+	if *labelHolesN > 0 {
+		cfg, err := loadRules(*rulesPath)
+		if err != nil {
+			return err
+		}
+		opts.HoleLabels = labelHoles(omlx.New(cfg.LLM.Model, cfg.LLM.BaseURL), p, path, *labelHolesN)
+	}
+
+	html, err := report.RenderWatchPathOpts(path, st, time.Now(), opts)
 	if err != nil {
 		return err
 	}

@@ -28,6 +28,7 @@ func (p paths) metaCacheDir() string       { return filepath.Join(p.dataDir, "ca
 func (p paths) classifyCache() string      { return filepath.Join(p.dataDir, "cache", "classify") }
 func (p paths) embedCacheDir() string      { return filepath.Join(p.dataDir, "cache", "embed") }
 func (p paths) nameCacheDir() string       { return filepath.Join(p.dataDir, "cache", "name") }
+func (p paths) holeLabelCacheDir() string  { return filepath.Join(p.dataDir, "cache", "holes") }
 func (p paths) classifiedJSONL() string {
 	return filepath.Join(p.dataDir, "classified.jsonl")
 }

@@ -539,10 +539,12 @@ function viewCard(r) {
 // label from the model, if this run had one, otherwise the plain facts —
 // the page has to read the same with an LLM and without one, so the name is
 // decoration and never structure.
+const holeLabel = new Map();
+if (D.holeLabels) for (const [ci, label] of D.holeLabels) holeLabel.set(ci, label);
+
 function chainName(ci) {
   const c = D.chains[ci];
-  const label = D.holeLabels && D.holeLabels[ci];
-  return label || ("chain of " + c[C_LEN] + " · " + areaName(c[C_AREA]));
+  return holeLabel.get(ci) || ("chain of " + c[C_LEN] + " · " + areaName(c[C_AREA]));
 }
 
 // chainFacts is the sentence that reads a chain backwards: how deep it went,

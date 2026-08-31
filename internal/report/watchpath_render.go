@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"html/template"
+	"sort"
 	"time"
 )
 
@@ -51,6 +52,10 @@ type pathData struct {
 	Clusters  [][]any     `json:"clusters"`  // area / subject / channel, most-watched first
 	Stats     *statsData  `json:"stats"`
 	Report    *reportData `json:"report,omitempty"` // nil when no Stats were handed in
+	// HoleLabels is [[chainIdx, "label"], …] for the chains a model named.
+	// Sparse and omitted entirely when no run produced any: the page reads
+	// it as decoration, never as structure.
+	HoleLabels [][]any `json:"holeLabels,omitempty"`
 }
 
 // clusterNodes turns the topic tree into [name, views, durationS, children],
@@ -405,7 +410,38 @@ func buildPathData(p *Path, st *Stats) *pathData {
 // st may be nil: the page then renders without the report view, which is what
 // keeps the shell independent of an aggregation it does not need.
 func RenderWatchPath(p *Path, st *Stats, generated time.Time) ([]byte, error) {
+	return RenderWatchPathOpts(p, st, generated, WatchPathOpts{})
+}
+
+// WatchPathOpts carries what the page can have but does not need. Everything
+// in here is decoration: the page must render, and read correctly, with the
+// zero value — which is what keeps a model outage from producing a broken
+// dashboard rather than a plainer one.
+type WatchPathOpts struct {
+	// HoleLabels names chains by index into Path.Chains. Sparse on purpose:
+	// only the ones a run actually paid for.
+	HoleLabels map[int]string
+}
+
+// RenderWatchPathOpts is RenderWatchPath plus the optional extras.
+func RenderWatchPathOpts(p *Path, st *Stats, generated time.Time, o WatchPathOpts) ([]byte, error) {
 	data := buildPathData(p, st)
+	if len(o.HoleLabels) > 0 {
+		// Sorted by index so two runs of the same data produce the same
+		// bytes — a page that differs only in map order would look like a
+		// change in every diff.
+		idx := make([]int, 0, len(o.HoleLabels))
+		for ci := range o.HoleLabels {
+			if ci >= 0 && ci < len(p.Chains) {
+				idx = append(idx, ci)
+			}
+		}
+		sort.Ints(idx)
+		data.HoleLabels = make([][]any, 0, len(idx))
+		for _, ci := range idx {
+			data.HoleLabels = append(data.HoleLabels, []any{ci, o.HoleLabels[ci]})
+		}
+	}
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
