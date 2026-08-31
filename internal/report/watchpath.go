@@ -124,6 +124,52 @@ type DayAgg struct {
 	Area     string  // dominant MAIN-LANE area; ties broken by name (dominant())
 	SessFrom int     // inclusive index range into Path.Sessions (newest first),
 	SessTo   int     // so Sessions[SessFrom] is the NEWEST sitting of that day
+
+	// What makes one day different from the next. All main-lane only, for
+	// the same reason the dominant area is: background must not vote on what
+	// a day WAS.
+	ChainViews int // views inside a rabbit hole
+	ChainMax   int // the deepest chain that started this day, in views
+	NightViews int // started inside the night window (see nightFromHour)
+	AreaN      int // distinct areas — a day on one subject reads differently
+	ThroughN   int // views the following gap covered in full
+	EdgedN     int // views that carry ANY edge — the honest denominator
+	NewChans   int // channels seen for the first time ever on this day
+
+	// Peak is the day's STRONGEST percentile rank across the four axes
+	// below, 0..1000, and PeakAxis names the axis that produced it. Not a
+	// weighted score: weights would be invented numbers sitting next to
+	// measured ones, and the reader could not tell them apart. "A day is
+	// interesting if it was extreme in SOME way" needs no weights, and the
+	// row can then say "top 0.4 % by chain depth" — a claim about the
+	// distribution, which is checkable, rather than a verdict.
+	Peak     int
+	PeakAxis string // "views", "chain", "night" or "areas"
+}
+
+// The night window. Not "after midnight": the 23:00 hour is already the one
+// where a sitting stops being an evening and becomes a night, and cutting at
+// 00:00 would file the first half of every long night under the day before.
+const (
+	nightFromHour = 23
+	nightToHour   = 5
+)
+
+// peakAxes are the four axes a day can be extreme on, in the order Peak
+// breaks ties: views first because it is the axis a reader already knows.
+var peakAxes = []struct {
+	name string
+	of   func(DayAgg) float64
+}{
+	{"views", func(d DayAgg) float64 { return float64(d.Views) }},
+	{"chain", func(d DayAgg) float64 { return float64(d.ChainMax) }},
+	{"night", func(d DayAgg) float64 {
+		if d.Views == 0 {
+			return 0
+		}
+		return float64(d.NightViews) / float64(d.Views)
+	}},
+	{"areas", func(d DayAgg) float64 { return float64(d.AreaN) }},
 }
 
 // Chain is one rabbit hole with an identity: the run of same-area main-lane
@@ -269,6 +315,8 @@ func BuildPath(rows []classify.Verdict) *Path {
 		}
 	}
 	p.Days = buildDays(sessions)
+	markDayChains(p) // after both: a day needs the chains, the chains a session
+	markDayPeaks(p.Days)
 	p.Trans = buildTransitions(sessions)
 	p.Clusters = buildClusters(sessions)
 	p.Stats = buildStats(p)
@@ -361,6 +409,7 @@ func markRabbitHoles(vs []PathView) [][2]int {
 func buildDays(sessions []Session) []DayAgg {
 	var days []DayAgg
 	var mainAreas []map[string]int
+	firstSeen := map[string]bool{} // channels already met, in time order
 	for i := len(sessions) - 1; i >= 0; i-- {
 		s := sessions[i]
 		date := s.Start.Format("2006-01-02")
@@ -378,15 +427,89 @@ func buildDays(sessions []Session) []DayAgg {
 		day.Views += len(s.Views)
 		for _, v := range s.Views {
 			day.Hours += float64(v.DurationS) / 3600
-			if !v.Overlap {
-				counts[v.Area]++ // background must not decide what a day was about
+			// First contact counts wherever it happened, background
+			// included: a channel first met as a track under a documentary
+			// was still met, and skipping those left 992 of 7382 channels
+			// counted as "new" on some LATER day, which is the one thing the
+			// number must not say. Sessions arrive newest first and this loop
+			// runs them backwards, so it walks the corpus in time order and
+			// the first sighting here is the first sighting there was.
+			if v.Channel != "" && !firstSeen[v.Channel] {
+				firstSeen[v.Channel] = true
+				day.NewChans++
+			}
+			if v.Overlap {
+				continue // background decides nothing else about a day
+			}
+			counts[v.Area]++
+			if v.Rabbit {
+				day.ChainViews++
+			}
+			if h := v.WatchedAt.Hour(); h >= nightFromHour || h < nightToHour {
+				day.NightViews++
+			}
+			if v.Edge != "" {
+				day.EdgedN++
+				if v.Edge == EdgeThrough {
+					day.ThroughN++
+				}
 			}
 		}
 	}
 	for i := range days {
 		days[i].Area = dominant(mainAreas[i])
+		days[i].AreaN = len(mainAreas[i])
 	}
 	return days
+}
+
+// markDayChains fills DayAgg.ChainMax: the deepest chain that STARTED on
+// that day. A chain belongs to the sitting it is in, and a sitting belongs
+// to the day it began — so a chain running past midnight counts on the day
+// the sitting did, which is the rule the views follow too.
+func markDayChains(p *Path) {
+	sessDay := make([]int, len(p.Sessions))
+	for di, day := range p.Days {
+		for si := day.SessFrom; si <= day.SessTo; si++ {
+			sessDay[si] = di
+		}
+	}
+	for _, c := range p.Chains {
+		di := sessDay[c.Session]
+		if c.Len > p.Days[di].ChainMax {
+			p.Days[di].ChainMax = c.Len
+		}
+	}
+}
+
+// markDayPeaks fills Peak and PeakAxis: the day's best percentile rank over
+// peakAxes. The rank counts days scoring STRICTLY less, so the best day of n
+// reaches (n-1)/n·1000 — never quite 1000, because a day does not beat
+// itself — while the most common value of a flat axis stays low. That is
+// what makes "top 0.4 % by chain depth" a statement about the distribution,
+// checkable, rather than a verdict about the day.
+//
+// Ties inside an axis share a rank; between axes the order in peakAxes
+// decides. Deterministic either way — nothing here reads a map's order.
+func markDayPeaks(days []DayAgg) {
+	if len(days) == 0 {
+		return
+	}
+	for _, ax := range peakAxes {
+		vals := make([]float64, len(days))
+		for i, d := range days {
+			vals[i] = ax.of(d)
+		}
+		sorted := append([]float64(nil), vals...)
+		sort.Float64s(sorted)
+		for i := range days {
+			below := sort.SearchFloat64s(sorted, vals[i]) // start of this value's run
+			rank := below * 1000 / len(days)
+			if rank > days[i].Peak {
+				days[i].Peak, days[i].PeakAxis = rank, ax.name
+			}
+		}
+	}
 }
 
 // buildTransitions counts what followed what on the main lane. A jump over a

@@ -18,7 +18,7 @@ package report
 //   - Video titles and channel names go through textContent or esc(), never
 //     into innerHTML raw. They are YouTube's data, not ours.
 var watchPathTpl = pageHead + pageCSS + pageBody + coreJS +
-	overviewJS + detailJS + clusterJS + reportJS + rankJS + introJS + pageTail
+	overviewJS + detailJS + clusterJS + reportJS + rankJS + rankDaysJS + introJS + pageTail
 
 const pageHead = `<!doctype html>
 <html lang="en">
@@ -431,7 +431,11 @@ const EDGE_TEXT = { through: "watched through", most: "most of it", skipped: "mo
 const R_TS = 1, R_DUR = 2, R_AREA = 3, R_SUB = 4, R_CHAN = 5,
       R_MODE = 6, R_EDGE = 7, R_GAP = 8, R_FLAGS = 9, R_TITLE = 10;
 const S_ROW = 0, S_TS = 1, S_SPAN = 2, S_N = 3, S_GAP = 4, S_DAY = 5;
-const DY_ED = 0, DY_VIEWS = 1, DY_AREA = 2, DY_FROM = 3, DY_TO = 4;
+const DY_ED = 0, DY_VIEWS = 1, DY_AREA = 2, DY_FROM = 3, DY_TO = 4,
+      DY_DUR = 5, DY_CHAINV = 6, DY_CHAINMAX = 7, DY_NIGHT = 8, DY_AREAN = 9,
+      DY_THROUGH = 10, DY_EDGED = 11, DY_NEWCH = 12, DY_PEAK = 13, DY_AXIS = 14;
+// The same order Go's peakAxes has: the axis travels as its index.
+const PEAK_AXES = ["views", "chain", "night", "areas"];
 const C_SESS = 0, C_FROM = 1, C_TO = 2, C_LEN = 3, C_AREA = 4, C_SPAN = 5, C_DUR = 6;
 
 const isOverlap = r => (r[R_FLAGS] & 1) !== 0;
@@ -929,6 +933,13 @@ function route() {
     scrollTo(0, 0);
     if (!D.chains || !D.chains.length) { notFound(viewEl, "a rabbit hole"); return; }
     teardown = renderHoles(viewEl, sortId, area) || null;
+    return;
+  }
+  if (parts[0] === "days") {
+    crumbs([{ text: "overview", hash: "/" }, { text: "the days" }]);
+    scrollTo(0, 0);
+    if (!D.days || !D.days.length) { notFound(viewEl, "a day"); return; }
+    teardown = renderDays(viewEl, parts[1] || "peak") || null;
     return;
   }
   if (parts[0] === "list") {

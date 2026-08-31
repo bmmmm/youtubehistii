@@ -137,6 +137,18 @@ func capChannels(cs []ChannelAgg, n int) []ChannelAgg {
 // durS turns an upper-bound hour figure back into whole seconds.
 func durS(hours float64) int { return int(hours*3600 + 0.5) }
 
+// peakAxisIdx sends the axis name as its position in peakAxes — the page has
+// the same list in the same order, so the name itself never has to ride 2374
+// times. -1 for a day that peaked on nothing (an empty path).
+func peakAxisIdx(name string) int {
+	for i, ax := range peakAxes {
+		if ax.name == name {
+			return i
+		}
+	}
+	return -1
+}
+
 // epochDay is the grid coordinate of a wall-clock date — the same number
 // DayAgg.EpochDay carries, so the page formats both with one helper.
 func epochDay(t time.Time) int {
@@ -344,7 +356,13 @@ func buildPathData(p *Path, st *Stats) *pathData {
 		if day.Area != "" {
 			areaIdx = areas.get(day.Area)
 		}
-		d.Days = append(d.Days, []any{day.EpochDay, day.Views, areaIdx, day.SessFrom, day.SessTo})
+		// The numbers after the range are what tells one day from the next.
+		// They are cheap — a day costs nine more integers where a single
+		// title costs more than that in bytes — and they are what the
+		// ranking, the calendar lenses and the day view all read.
+		d.Days = append(d.Days, []any{day.EpochDay, day.Views, areaIdx, day.SessFrom, day.SessTo,
+			durS(day.Hours), day.ChainViews, day.ChainMax, day.NightViews, day.AreaN,
+			day.ThroughN, day.EdgedN, day.NewChans, day.Peak, peakAxisIdx(day.PeakAxis)})
 	}
 	d.Trans = make([][]int, 0, len(p.Trans))
 	for _, tr := range p.Trans {
@@ -416,6 +434,8 @@ func RenderWatchPath(p *Path, st *Stats, generated time.Time) ([]byte, error) {
 		"LongVideo":  fmt.Sprintf("%d", longVideoS/60),
 		"RabbitLen":  fmt.Sprintf("%d", rabbitMinLen),
 		"RabbitGap":  fmt.Sprintf("%.0f", rabbitMaxGap.Minutes()),
+		"NightFrom":  fmt.Sprintf("%d", nightFromHour),
+		"NightTo":    fmt.Sprintf("%d", nightToHour),
 	})
 	if err != nil {
 		return nil, err

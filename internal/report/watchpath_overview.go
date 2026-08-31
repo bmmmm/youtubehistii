@@ -134,7 +134,7 @@ function buildCalendar(days) {
   const panel = $("div", "panel");
   panel.appendChild($("h2", null, "the calendar"));
   const rule = $("p", "muted",
-    "One cell is one day. The hue is the area most of that day's main-lane views belonged to, the opacity is that day's views against the busiest day of the whole span. A sitting counts on the day it BEGAN, so an evening that runs past midnight stays on that evening.");
+    "One cell is one day. The hue is the area most of that day's main-lane views belonged to; what the opacity means is yours to pick below. A sitting counts on the day it BEGAN, so an evening that runs past midnight stays on that evening.");
   const filterNote = $("span");
   rule.appendChild(filterNote);
   panel.appendChild(rule);
@@ -252,6 +252,59 @@ function buildCalendar(days) {
         (sel.days.size === 1 ? " day " : " days ") + sel.label +
         " happened on keep their colour.";
   }
+
+  // The lens changes what the OPACITY means, never the hue: the colour of a
+  // day is what it was about, and that answer does not depend on the
+  // question being asked. Views is the one the page opens with, because it
+  // is the only one that needs no explaining.
+  //
+  // It is local state, not a hash step — the same call the transition
+  // graph's selection makes. Switching lens is looking at the same picture
+  // differently, not going somewhere; a back button full of lens changes
+  // would bury the step that actually moved.
+  const LENSES = [
+    { id: "views", text: "views", of: d => d[DY_VIEWS],
+      note: " Opacity is that day's views against the busiest day." },
+    { id: "chain", text: "time in a chain", of: d => (d[DY_VIEWS] ? d[DY_CHAINV] / d[DY_VIEWS] : 0),
+      note: " Opacity is the share of the day spent inside a rabbit hole." },
+    { id: "night", text: "night share", of: d => (d[DY_VIEWS] ? d[DY_NIGHT] / d[DY_VIEWS] : 0),
+      note: " Opacity is the share of the day started between " + {{.NightFrom}} + ":00 and " + {{.NightTo}} + ":00." },
+    { id: "held", text: "watched through", of: d => (d[DY_EDGED] ? d[DY_THROUGH] / d[DY_EDGED] : 0),
+      note: " Opacity is the share of the day watched through to the end — days with no known length stay faint." },
+    { id: "new", text: "new channels", of: d => d[DY_NEWCH],
+      note: " Opacity is how many channels were seen for the first time that day." },
+    { id: "peak", text: "how unusual", of: d => d[DY_PEAK] / 1000,
+      note: " Opacity is the day's strongest rank across views, chain depth, night share and spread." },
+  ];
+  const lensNote = $("span");
+  rule.appendChild(lensNote);
+
+  function applyLens(id) {
+    const lens = LENSES.find(l => l.id === id) || LENSES[0];
+    let top = 0;
+    for (const c of cells) top = Math.max(top, lens.of(days[c.di]));
+    for (const c of cells) {
+      const v = top > 0 ? lens.of(days[c.di]) / top : 0;
+      // sqrt for the same reason the views lens needs it: a linear ramp
+      // leaves nine days out of ten a faint smudge under the few extremes.
+      c.op = (0.18 + 0.82 * Math.sqrt(Math.max(0, v))).toFixed(3);
+      c.el.setAttribute("fill-opacity", c.op);
+    }
+    lensNote.textContent = lens.note;
+  }
+
+  const picker = $("label", "pick");
+  picker.appendChild($("span", null, "shade by "));
+  const sel = $("select");
+  for (const l of LENSES) {
+    const o = $("option", null, l.text);
+    o.value = l.id;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => applyLens(sel.value));
+  picker.appendChild(sel);
+  panel.insertBefore(picker, chart);
+  applyLens("views");
 
   return { panel: panel, filter: filter, cells: cells.length };
 }

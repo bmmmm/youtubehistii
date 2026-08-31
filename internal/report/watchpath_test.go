@@ -1345,3 +1345,189 @@ func TestChainRowsPointAtTheirViews(t *testing.T) {
 		}
 	}
 }
+
+// TestDayAggregatesCountWhatTheyClaim builds a day whose numbers can be
+// counted by hand: a four-video chain, one night video, two areas, and one
+// background track that must not vote on any of it.
+func TestDayAggregatesCountWhatTheyClaim(t *testing.T) {
+	// 12:00 start (pathT0), a chain of four on sports, then a documentary
+	// with music running under it, then one view at 23:30.
+	p := BuildPath([]classify.Verdict{
+		view(0, "sports", 300),
+		view(6*time.Minute, "sports", 300),
+		view(12*time.Minute, "sports", 300),
+		view(18*time.Minute, "sports", 300),
+		view(60*time.Minute, "film-animation", 45*60),
+		view(65*time.Minute, "music", 200), // inside the documentary: overlap
+		view(11*time.Hour+30*time.Minute, "music", 300),
+	})
+	if len(p.Days) != 1 {
+		t.Fatalf("days = %d, want 1", len(p.Days))
+	}
+	d := p.Days[0]
+	if d.ChainViews != 4 {
+		t.Errorf("chainViews = %d, want the four of the chain", d.ChainViews)
+	}
+	if d.ChainMax != 4 {
+		t.Errorf("chainMax = %d, want 4", d.ChainMax)
+	}
+	// 23:30 is inside the night window; nothing else is.
+	if d.NightViews != 1 {
+		t.Errorf("nightViews = %d, want 1", d.NightViews)
+	}
+	// sports, film-animation, music — the overlapping music does not count,
+	// but the 23:30 one does, so music is in either way.
+	if d.AreaN != 3 {
+		t.Errorf("areaN = %d, want 3 main-lane areas", d.AreaN)
+	}
+	// Every main-lane view but the last of a sitting has an edge.
+	if d.EdgedN == 0 || d.ThroughN > d.EdgedN {
+		t.Errorf("through %d of %d edged views", d.ThroughN, d.EdgedN)
+	}
+	// One channel across the whole fixture, first seen on this day.
+	if d.NewChans != 1 {
+		t.Errorf("newChans = %d, want 1", d.NewChans)
+	}
+}
+
+// TestNightIsLocalAndBoundedAtTheThreshold pins both edges of the window.
+// 23:00 is night, 22:59 is not; 04:59 is, 05:00 is not — and all of it in
+// wall-clock time, the way the rest of the page reads a timestamp.
+func TestNightIsLocalAndBoundedAtTheThreshold(t *testing.T) {
+	at := func(h, m int) classify.Verdict {
+		v := view(0, "music", 300)
+		y, mo, d := pathT0.Date()
+		v.WatchedAt = time.Date(y, mo, d, h, m, 0, 0, time.Local)
+		return v
+	}
+	for _, tc := range []struct {
+		h, m  int
+		night bool
+	}{
+		{22, 59, false}, {23, 0, true}, {23, 30, true},
+		{4, 59, true}, {5, 0, false}, {12, 0, false},
+	} {
+		p := BuildPath([]classify.Verdict{at(tc.h, tc.m)})
+		got := p.Days[0].NightViews == 1
+		if got != tc.night {
+			t.Errorf("%02d:%02d counted as night = %v, want %v", tc.h, tc.m, got, tc.night)
+		}
+	}
+}
+
+// TestNewChannelsAreCountedOnce: a channel watched on three days is new on
+// the first of them and on none of the others. That is what makes the count
+// readable as "how many people the algorithm introduced you to that day".
+func TestNewChannelsAreCountedOnce(t *testing.T) {
+	mk := func(offset time.Duration, chanName string) classify.Verdict {
+		v := view(offset, "music", 300)
+		v.Channel = chanName
+		return v
+	}
+	p := BuildPath([]classify.Verdict{
+		mk(0, "one"),
+		mk(24*time.Hour, "one"),
+		mk(48*time.Hour, "one"),
+		mk(48*time.Hour+time.Minute, "two"),
+	})
+	if len(p.Days) != 3 {
+		t.Fatalf("days = %d, want 3", len(p.Days))
+	}
+	// Days run oldest first.
+	want := []int{1, 0, 1}
+	for i, w := range want {
+		if p.Days[i].NewChans != w {
+			t.Errorf("day %d (%s): newChans = %d, want %d", i, p.Days[i].Date, p.Days[i].NewChans, w)
+		}
+	}
+
+	// A channel first met as BACKGROUND was still met. Counting only the
+	// main lane left 992 of 7382 channels on the real corpus counted as new
+	// on some later day — the one thing this number must not say.
+	bg := func(offset time.Duration, topic, chanName string, durS int) classify.Verdict {
+		v := view(offset, topic, durS)
+		v.Channel = chanName
+		return v
+	}
+	q := BuildPath([]classify.Verdict{
+		bg(0, "film-animation", "doc-channel", 45*60),
+		bg(5*time.Minute, "music", "background-channel", 200), // overlap
+		bg(24*time.Hour, "music", "background-channel", 200),  // main lane, next day
+	})
+	if len(q.Days) != 2 {
+		t.Fatalf("days = %d, want 2", len(q.Days))
+	}
+	if q.Days[0].NewChans != 2 {
+		t.Errorf("first day met %d new channels, want 2 — the background one counts",
+			q.Days[0].NewChans)
+	}
+	if q.Days[1].NewChans != 0 {
+		t.Errorf("second day met %d new channels, want 0 — it was met yesterday, in the background",
+			q.Days[1].NewChans)
+	}
+
+	// And the totals close: every channel is new exactly once.
+	total := 0
+	for _, d := range q.Days {
+		total += d.NewChans
+	}
+	seen := map[string]bool{}
+	for _, s := range q.Sessions {
+		for _, v := range s.Views {
+			if v.Channel != "" {
+				seen[v.Channel] = true
+			}
+		}
+	}
+	if total != len(seen) {
+		t.Errorf("new channels sum to %d, but %d distinct channels were watched", total, len(seen))
+	}
+}
+
+// TestPeakIsTheStrongestPercentile is the reason Peak is a max of ranks and
+// not a weighted sum: a quiet day with the deepest chain of the whole corpus
+// must still come out on top, which a blend of "views and depth" would bury
+// under the busy days.
+func TestPeakIsTheStrongestPercentile(t *testing.T) {
+	var rows []classify.Verdict
+	// Three loud days: twelve views each, no chain (alternating areas).
+	for d := 0; d < 3; d++ {
+		for i := 0; i < 12; i++ {
+			area := "music"
+			if i%2 == 1 {
+				area = "sports"
+			}
+			rows = append(rows, view(time.Duration(d)*24*time.Hour+time.Duration(i)*7*time.Minute, area, 300))
+		}
+	}
+	// One quiet day: five views, but all one area back to back — a chain.
+	for i := 0; i < 5; i++ {
+		rows = append(rows, view(3*24*time.Hour+time.Duration(i)*6*time.Minute, "gaming", 300))
+	}
+	p := BuildPath(rows)
+	if len(p.Days) != 4 {
+		t.Fatalf("days = %d, want 4", len(p.Days))
+	}
+	quiet := p.Days[3] // oldest first, so the chain day is last
+	if quiet.ChainMax != 5 {
+		t.Fatalf("the quiet day's chain is %d long, want 5", quiet.ChainMax)
+	}
+	// Three of the four days score 0 on the chain axis, so the quiet one has
+	// 3 of 4 strictly below it: 750. The top of the scale is (n-1)/n·1000,
+	// not 1000 — the rank counts days BEATEN, and a day never beats itself.
+	if quiet.Peak != 750 || quiet.PeakAxis != "chain" {
+		t.Errorf("quiet day peaks at %d on %q, want 750 on chain", quiet.Peak, quiet.PeakAxis)
+	}
+	// The point of the max-of-ranks: the quiet day outranks every loud one,
+	// which a blend of views and depth would have buried.
+	for i := 0; i < 3; i++ {
+		loud := p.Days[i]
+		if loud.Peak >= quiet.Peak {
+			t.Errorf("loud day %d peaks at %d on %q, not below the quiet day's %d",
+				i, loud.Peak, loud.PeakAxis, quiet.Peak)
+		}
+		if loud.Peak == 0 {
+			t.Errorf("loud day %d peaks at 0 — three days tie on views, and a tie is still a rank", i)
+		}
+	}
+}

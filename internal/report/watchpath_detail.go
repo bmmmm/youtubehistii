@@ -34,6 +34,103 @@ function fit(s, px, size) {
   return s.slice(0, lo) + "…";
 }
 
+// dayTiles are the numbers that make one day different from the next. Each
+// one that HAS a destination carries it: the deepest chain opens that exact
+// run, the rank opens the ranking. A number you cannot act on is a number
+// that could have stayed in the sentence above.
+function dayTiles(day, di) {
+  const t = $("div", "tiles");
+  const add = (k, v, s, hash) => {
+    const el = hash ? $("a", "tile") : $("div", "tile");
+    if (hash) el.href = hash;
+    el.appendChild($("div", "k", k));
+    el.appendChild($("div", "v", v));
+    if (s) el.appendChild($("div", "s", s));
+    t.appendChild(el);
+  };
+  // The day's deepest chain, found among the sittings of the day — the
+  // payload says how deep it was, and this finds which one it is so the
+  // tile can open it rather than merely name a number.
+  let best = -1;
+  for (let si = day[DY_FROM]; si <= day[DY_TO]; si++) {
+    for (const ci of chainsOf(si)) {
+      if (best < 0 || D.chains[ci][C_LEN] > D.chains[best][C_LEN]) best = ci;
+    }
+  }
+  if (best >= 0) {
+    const c = D.chains[best];
+    const k = chainsOf(c[C_SESS]).indexOf(best);
+    add("deepest chain", c[C_LEN] + " videos", areaName(c[C_AREA]),
+      "#/session/" + c[C_SESS] + "/chain/" + k);
+  }
+  if (day[DY_CHAINV] > 0) {
+    add("inside a chain", Math.round(100 * day[DY_CHAINV] / day[DY_VIEWS]) + "%",
+      day[DY_CHAINV] + " of the day's videos");
+  }
+  if (day[DY_NIGHT] > 0) {
+    add("after " + {{.NightFrom}}, Math.round(100 * day[DY_NIGHT] / day[DY_VIEWS]) + "%",
+      day[DY_NIGHT] + (day[DY_NIGHT] === 1 ? " video" : " videos"));
+  }
+  add("areas", String(day[DY_AREAN]), day[DY_AREAN] === 1 ? "one subject all day" : "");
+  // Only when something was measurable: a day of videos with no known length
+  // has no retention, and a zero would read as "watched nothing".
+  if (day[DY_EDGED] > 0) {
+    add("watched through", Math.round(100 * day[DY_THROUGH] / day[DY_EDGED]) + "%",
+      "of " + day[DY_EDGED] + " with a known length");
+  }
+  if (day[DY_NEWCH] > 0) {
+    add("new channels", String(day[DY_NEWCH]), "first seen this day");
+  }
+  return t;
+}
+
+// dayNeighbourhood is the three weeks around this day as bars, this one
+// marked. It answers the question a single day cannot — was this an outlier
+// or a phase — and it makes stepping to a neighbour a place rather than a
+// list entry. Everything it draws is already on the payload.
+function dayNeighbourhood(di) {
+  const SPAN = 10; // days either side
+  const from = Math.max(0, di - SPAN), to = Math.min(D.days.length - 1, di + SPAN);
+  const panel = $("div", "panel");
+  panel.appendChild($("p", "muted",
+    "The days around this one that carried a sitting — height is views, the " +
+    "marked bar is this day."));
+  const n = to - from + 1;
+  const W = 720, H = 84, PAD = 10;
+  const bw = Math.max(3, (W - 2 * PAD) / n - 3);
+  let max = 1;
+  for (let i = from; i <= to; i++) max = Math.max(max, D.days[i][DY_VIEWS]);
+  const s = svg("svg", { viewBox: "0 0 " + W + " " + H, width: "100%", role: "img" });
+  const ttl = svg("title", {});
+  ttl.textContent = "views per day around " + dayDate(D.days[di][DY_ED]);
+  s.appendChild(ttl);
+  for (let i = from; i <= to; i++) {
+    const d = D.days[i];
+    // sqrt, like the calendar: one huge day would flatten the rest to a line.
+    const h = Math.max(2, Math.sqrt(d[DY_VIEWS] / max) * (H - 22));
+    const x = PAD + (i - from) * ((W - 2 * PAD) / n);
+    const g = svg("g", {});
+    g.appendChild(svg("rect", {
+      x: x, y: H - 12 - h, width: bw, height: h, rx: 2,
+      fill: d[DY_AREA] >= 0 ? areaColor(d[DY_AREA]) : "var(--line)",
+      "fill-opacity": i === di ? 1 : 0.5,
+    }));
+    if (i === di) {
+      // The marker is drawn, not just an opacity difference: opacity alone
+      // is invisible in a screenshot and to anyone not comparing bars.
+      g.appendChild(svg("rect", { x: x, y: H - 8, width: bw, height: 3, rx: 1.5, fill: "var(--fg)" }));
+    }
+    clickTo(g, "#/day/" + dayDate(d[DY_ED]));
+    hover(g, () => "<b>" + esc(dayLabel(d[DY_ED])) + '</b><span class="m">' +
+      d[DY_VIEWS] + " views" + (d[DY_CHAINMAX] > 0 ? " · longest chain " + d[DY_CHAINMAX] : "") + "</span>");
+    s.appendChild(g);
+  }
+  const chart = $("div", "chart");
+  chart.appendChild(s);
+  panel.appendChild(chart);
+  return panel;
+}
+
 // chainPanel is the focused chain read out loud: its facts, the way to its
 // neighbours inside the sitting, and the way out to the ranking. It sits
 // above the diagram because it names what the highlighted bracket below is.
@@ -137,6 +234,31 @@ function renderDay(root, di) {
     " · " + areaName(day[DY_AREA]) +
     " · " + order.length + (order.length === 1 ? " sitting" : " sittings") +
     " · at most " + hours.toFixed(1) + " h of video"));
+
+  // D.days holds only days that carried a sitting, so the neighbour in the
+  // array IS the next day with something on it — no scanning, and no link
+  // that lands on an empty page. Days run oldest first.
+  const near = $("p", "near");
+  const step = (target, text) => {
+    if (target < 0 || target >= D.days.length) {
+      near.appendChild($("span", "muted", text));
+      return;
+    }
+    const a = $("a", null, text + " " + dayDate(D.days[target][DY_ED]));
+    a.href = "#/day/" + dayDate(D.days[target][DY_ED]);
+    near.appendChild(a);
+  };
+  step(di - 1, "‹");
+  near.appendChild($("span", "sep", "·"));
+  const rank = $("a", null, peakLine(day) || "all days");
+  rank.href = "#/days";
+  near.appendChild(rank);
+  near.appendChild($("span", "sep", "·"));
+  step(di + 1, "›");
+  root.appendChild(near);
+
+  root.appendChild(dayTiles(day, di));
+  root.appendChild(dayNeighbourhood(di));
   if (!items.length) return;
 
   // ---- the axis
