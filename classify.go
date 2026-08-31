@@ -112,9 +112,55 @@ type passStats struct {
 // wait for enrich unless opts.includeUnenriched. New LLM verdicts go to the
 // cache AND into cached, so a wave caller hands the same map in every time.
 // Ends by rewriting classified.jsonl (atomic).
+//
+// The pass runs as four stages on one shared state (the pass struct below):
+// rules, cached verdicts, the live LLM round, and the write-out. Each stage
+// reads what the previous ones left and nothing later.
 func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[string]enrich.Meta, cached map[string]classify.LLMVerdict, opts classifyOpts) (passStats, error) {
-	var st passStats
+	r := &pass{
+		p: p, cfg: cfg, views: views, metas: metas, cached: cached, opts: opts,
+		taxonomy: cfg.Fingerprint(),
+		items:    map[string]classify.Item{},
+		verdicts: map[string]videoVerdict{},
+		llmDown:  opts.noLLM,
+	}
+	live := r.resolveCached(r.matchRules())
+	if err := r.askLive(live); err != nil {
+		return r.st, err
+	}
+	if err := r.write(); err != nil {
+		return r.st, err
+	}
+	return r.st, nil
+}
 
+// pass is one classifyPass mid-flight: the inputs it was called with and the
+// state its stages hand from one to the next.
+type pass struct {
+	p      paths
+	cfg    *rules.Config
+	views  []takeout.View
+	metas  map[string]enrich.Meta
+	cached map[string]classify.LLMVerdict
+	opts   classifyOpts
+
+	taxonomy      string                   // cfg.Fingerprint(), stamped on new verdicts and compared against cached ones
+	items         map[string]classify.Item // one matcher input per unique video
+	verdicts      map[string]videoVerdict  // what the pass has decided so far, by video
+	st            passStats
+	llmDown       bool // starts as opts.noLLM, flips on a connection loss
+	parseWarnings []string
+}
+
+type videoVerdict struct {
+	topic, mode, source string
+	confidence          float64
+}
+
+// matchRules is stage 1: build the matcher input per unique video, derive
+// the area from the YouTube category, run the rules, and return the IDs the
+// rules could not answer (sorted, so the pass is deterministic).
+func (r *pass) matchRules() (needLLM []string) {
 	// Per unique video: build the matcher input (canonical metadata wins,
 	// the takeout row fills the gaps), derive the area from the YouTube
 	// category, and run stage 1.
@@ -125,16 +171,15 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 	// specific subject (the sub), and consume or learn (the mode). Only videos
 	// with no category at all (tombstoned or not yet enriched) still have their
 	// area decided by the model.
-	items := map[string]classify.Item{}
-	for _, v := range views {
+	for _, v := range r.views {
 		if v.VideoID == "" {
 			continue
 		}
-		if _, done := items[v.VideoID]; done {
+		if _, done := r.items[v.VideoID]; done {
 			continue
 		}
 		item := classify.Item{Input: rules.Input{Title: v.Title, Channel: v.Channel}}
-		if m, ok := metas[v.VideoID]; ok && !m.Unavailable {
+		if m, ok := r.metas[v.VideoID]; ok && !m.Unavailable {
 			if m.Title != "" {
 				item.Title = m.Title
 			}
@@ -143,52 +188,46 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			}
 			item.Tags = m.Tags
 			item.Categories = m.Categories
-			item.Area, _ = cfg.AreaForCategory(rules.FirstCategory(m.Categories))
+			item.Area, _ = r.cfg.AreaForCategory(rules.FirstCategory(m.Categories))
 		}
-		items[v.VideoID] = item
+		r.items[v.VideoID] = item
 	}
-	st.unique = len(items)
+	r.st.unique = len(r.items)
 
-	type videoVerdict struct {
-		topic, mode, source string
-		confidence          float64
-	}
-	verdicts := map[string]videoVerdict{}
-	var needLLM []string
-	for id, item := range items {
-		if topic, mode, ruleID, ok := cfg.Match(item.Input); ok {
-			verdicts[id] = videoVerdict{topic: topic, mode: mode, source: "rule:" + ruleID}
+	for id, item := range r.items {
+		if topic, mode, ruleID, ok := r.cfg.Match(item.Input); ok {
+			r.verdicts[id] = videoVerdict{topic: topic, mode: mode, source: "rule:" + ruleID}
 		} else {
 			needLLM = append(needLLM, id)
 		}
 	}
-	st.ruleHits = len(verdicts)
+	r.st.ruleHits = len(r.verdicts)
 	sort.Strings(needLLM)
-	if opts.progress {
+	if r.opts.progress {
 		withArea := 0
 		for _, id := range needLLM {
-			if items[id].Area != "" {
+			if r.items[id].Area != "" {
 				withArea++
 			}
 		}
 		fmt.Printf("%d unique videos: %d matched by rules, %d for the LLM (%d of those with the area already fixed by their YouTube category)\n",
-			len(items), len(verdicts), len(needLLM), withArea)
+			len(r.items), len(r.verdicts), len(needLLM), withArea)
 	}
+	return needLLM
+}
 
-	// Stage 2 — cached LLM verdicts first, then select what to ask live. A
-	// stale title-only verdict stays in place as a fallback until its re-ask
-	// (with full metadata) lands, so an oMLX outage never loses coverage.
-	llmCache := classify.Cache{Dir: p.classifyCache()}
-	taxonomy := cfg.Fingerprint()
-	var live []string
+// resolveCached is stage 2 — cached LLM verdicts first, then select what to
+// ask live. A stale title-only verdict stays in place as a fallback until its
+// re-ask (with full metadata) lands, so an oMLX outage never loses coverage.
+func (r *pass) resolveCached(needLLM []string) (live []string) {
 	cachedHits, taxonomyStale := 0, 0
 	oldTaxonomies := map[string]bool{}
 	for _, id := range needLLM {
-		m, hasMeta := metas[id]
-		if v, ok := cached[id]; ok {
+		m, hasMeta := r.metas[id]
+		if v, ok := r.cached[id]; ok {
 			// Canonicalize on read, so a sub alias added after a run folds
 			// old verdicts on the next pass without asking the LLM again.
-			topic, usable := cfg.NormalizeTopic(v.Topic)
+			topic, usable := r.cfg.NormalizeTopic(v.Topic)
 			// The category decides the area — a cached verdict is no
 			// exception. An older taxonomy that spelled it differently
 			// ("politics" for what is now "news-politics") must not outvote
@@ -203,25 +242,25 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			// out of the old "gaming/other" and "dev/tutorials". Where the
 			// area is unchanged (a reworded desc, a new alias) the sub still
 			// stands. Either way a re-ask is queued below.
-			if area := items[id].Area; area != "" {
+			if area := r.items[id].Area; area != "" {
 				oldArea, _ := rules.SplitTopic(v.Topic)
 				if strings.EqualFold(strings.TrimSpace(oldArea), area) {
-					topic, usable = cfg.ReplaceArea(v.Topic, area), true
+					topic, usable = r.cfg.ReplaceArea(v.Topic, area), true
 				} else {
 					topic, usable = area, true
 				}
 			}
 			if usable {
-				verdicts[id] = videoVerdict{topic: topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
+				r.verdicts[id] = videoVerdict{topic: topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
 				cachedHits++
 			}
 			// -keep-verdicts pins the check to whatever the verdict already
 			// carries, so a taxonomy change cannot make it stale and only the
 			// metadata rule still applies.
-			want := taxonomy
-			if opts.keepVerdicts {
+			want := r.taxonomy
+			if r.opts.keepVerdicts {
 				want = v.Taxonomy
-			} else if v.Taxonomy != taxonomy {
+			} else if v.Taxonomy != r.taxonomy {
 				taxonomyStale++
 				oldTaxonomies[v.Taxonomy] = true
 			}
@@ -230,10 +269,10 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			}
 			continue
 		}
-		if hasMeta || opts.includeUnenriched {
+		if hasMeta || r.opts.includeUnenriched {
 			live = append(live, id)
 		} else {
-			st.waiting++
+			r.st.waiting++
 		}
 	}
 	// Always reported, progress or not: re-asking the cache is the most
@@ -248,59 +287,65 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		}
 		sort.Strings(olds)
 		fmt.Printf("taxonomy changed (%s → %s): re-asking %d cached verdicts\n",
-			strings.Join(olds, ", "), taxonomy, taxonomyStale)
+			strings.Join(olds, ", "), r.taxonomy, taxonomyStale)
 	}
-	if opts.progress {
+	if r.opts.progress {
 		fmt.Printf("LLM: %d cached verdicts, %d to ask, %d waiting for enrich\n",
-			cachedHits, len(live), st.waiting)
+			cachedHits, len(live), r.st.waiting)
 	}
+	return live
+}
 
-	llmDown := opts.noLLM
-	if opts.llmLimit > 0 && len(live) > opts.llmLimit {
-		live = live[:opts.llmLimit]
-		if opts.progress {
+// askLive is stage 3: the live LLM round — batches, parsing, the verified
+// single-request fallback — over the IDs stage 2 selected. It returns an
+// error only for a broken verdict cache; a lost server just flips llmDown
+// and leaves the rest of the pass to run on what it has.
+func (r *pass) askLive(live []string) error {
+	if r.opts.llmLimit > 0 && len(live) > r.opts.llmLimit {
+		live = live[:r.opts.llmLimit]
+		if r.opts.progress {
 			fmt.Printf("limiting LLM calls to %d this run\n", len(live))
 		}
 	}
 
-	var parseWarnings []string
-	if !llmDown && len(live) > 0 {
-		client := omlx.New(cfg.LLM.Model, cfg.LLM.BaseURL)
+	if !r.llmDown && len(live) > 0 {
+		llmCache := classify.Cache{Dir: r.p.classifyCache()}
+		client := omlx.New(r.cfg.LLM.Model, r.cfg.LLM.BaseURL)
 		// Discovery doubles as health check: bail out early with the real
 		// model list instead of failing per-video.
 		models, err := client.Models()
 		switch {
 		case err != nil:
 			fmt.Fprintf(os.Stderr, "warning: %v\nwarning: skipping the LLM this pass — %d videos wait for the next one\n", err, len(live))
-			llmDown = true
+			r.llmDown = true
 		case !slices.Contains(models, client.Model):
 			fmt.Fprintf(os.Stderr, "warning: model %q not on the oMLX server (available: %s)\nwarning: skipping the LLM this pass — %d videos wait for the next one\n",
 				client.Model, strings.Join(models, ", "), len(live))
-			llmDown = true
+			r.llmDown = true
 		}
-		if !llmDown && opts.progress {
+		if !r.llmDown && r.opts.progress {
 			fmt.Printf("asking %s (model %s)\n", client.BaseURL, client.Model)
 		}
 
 		// What the model gets to reuse: every sub already assigned, by rules
 		// and by cached verdicts alike.
-		topicsSoFar := make([]string, 0, len(verdicts)+len(cached))
-		for _, v := range verdicts {
+		topicsSoFar := make([]string, 0, len(r.verdicts)+len(r.cached))
+		for _, v := range r.verdicts {
 			topicsSoFar = append(topicsSoFar, v.topic)
 		}
-		for _, v := range cached {
+		for _, v := range r.cached {
 			topicsSoFar = append(topicsSoFar, v.Topic)
 		}
-		seeds := collectSubSeeds(cfg, topicsSoFar)
+		seeds := collectSubSeeds(r.cfg, topicsSoFar)
 
 		basisFor := func(id string) string {
-			if m, ok := metas[id]; ok && !m.Unavailable {
+			if m, ok := r.metas[id]; ok && !m.Unavailable {
 				return classify.BasisFull
 			}
 			return classify.BasisTitleOnly
 		}
-		batchSize := max(opts.llmBatch, 1)
-		workers := max(opts.llmWorkers, 1)
+		batchSize := max(r.opts.llmBatch, 1)
+		workers := max(r.opts.llmWorkers, 1)
 		var (
 			mu            sync.Mutex
 			fatal         error
@@ -309,10 +354,10 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		)
 		// The helpers below must be called under mu.
 		connLost := func(err error) {
-			if !llmDown {
+			if !r.llmDown {
 				fmt.Fprintf(os.Stderr, "warning: %v\nwarning: skipping the LLM for the rest of this pass — verdicts so far are cached\n", err)
 			}
-			llmDown = true
+			r.llmDown = true
 		}
 		store := func(id string, v classify.LLMVerdict) {
 			// Where the YouTube category fixed the area, the answer's area is
@@ -320,24 +365,24 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			// keep the sub the model found and put the area back. The prompt
 			// says as much, so a mismatch is a prompt-quality signal, counted
 			// and reported rather than silently corrected.
-			if area := items[id].Area; area != "" {
-				if fixed := cfg.ReplaceArea(v.Topic, area); fixed != v.Topic {
+			if area := r.items[id].Area; area != "" {
+				if fixed := r.cfg.ReplaceArea(v.Topic, area); fixed != v.Topic {
 					areaOverrides++
 					v.Topic = fixed
 				}
 			}
 			v.Model = client.Model
 			v.Basis = basisFor(id)
-			v.Taxonomy = taxonomy
+			v.Taxonomy = r.taxonomy
 			if err := llmCache.Write(id, v); err != nil {
 				if fatal == nil {
 					fatal = err
 				}
 				return
 			}
-			cached[id] = v
-			verdicts[id] = videoVerdict{topic: v.Topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
-			st.llmNew++
+			r.cached[id] = v
+			r.verdicts[id] = videoVerdict{topic: v.Topic, mode: v.Mode, source: "llm:" + v.Model, confidence: v.Confidence}
+			r.st.llmNew++
 		}
 
 		process := func(ids []string) {
@@ -345,9 +390,9 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			if len(ids) > 1 {
 				batch := make([]classify.Item, len(ids))
 				for i, id := range ids {
-					batch[i] = items[id]
+					batch[i] = r.items[id]
 				}
-				system, user := classify.BuildBatchPrompt(cfg, batch, seeds)
+				system, user := classify.BuildBatchPrompt(r.cfg, batch, seeds)
 				// max_tokens scales with the batch: ~15 tokens per verdict
 				// line plus headroom, so replies are never cut off mid-line.
 				reply, err := client.ChatMax(system, user, 30*len(ids)+200)
@@ -358,15 +403,15 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 						mu.Unlock()
 						return
 					}
-					parseWarnings = append(parseWarnings, fmt.Sprintf("batch of %d: %v", len(ids), err))
+					r.parseWarnings = append(r.parseWarnings, fmt.Sprintf("batch of %d: %v", len(ids), err))
 					mu.Unlock()
-				} else if batch, perr := classify.ParseBatchVerdicts(cfg, ids, reply); perr != nil {
+				} else if batch, perr := classify.ParseBatchVerdicts(r.cfg, ids, reply); perr != nil {
 					mu.Lock()
 					// The parse error alone says a batch failed, not why. The
 					// head of the reply does — a wrong field order, a code
 					// fence, a reasoning preamble all look different, and the
 					// fallback that follows costs one request PER video.
-					parseWarnings = append(parseWarnings,
+					r.parseWarnings = append(r.parseWarnings,
 						fmt.Sprintf("batch of %d: %v\n    reply began: %s", len(ids), perr, replyHead(reply)))
 					mu.Unlock()
 				} else {
@@ -382,12 +427,12 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			// reply — the verified per-video path, never guessed mappings.
 			for _, id := range rest {
 				mu.Lock()
-				stop := llmDown || fatal != nil
+				stop := r.llmDown || fatal != nil
 				mu.Unlock()
 				if stop {
 					return
 				}
-				v, err := askLLM(client, cfg, items[id], seeds)
+				v, err := askLLM(client, r.cfg, r.items[id], seeds)
 				mu.Lock()
 				switch {
 				case err != nil && isConnErr(err):
@@ -395,7 +440,7 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 					mu.Unlock()
 					return
 				case err != nil:
-					parseWarnings = append(parseWarnings, fmt.Sprintf("%s: %v", id, err))
+					r.parseWarnings = append(r.parseWarnings, fmt.Sprintf("%s: %v", id, err))
 				default:
 					store(id, v)
 				}
@@ -411,14 +456,14 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 				defer wg.Done()
 				for ids := range jobs {
 					mu.Lock()
-					skip := llmDown || fatal != nil
+					skip := r.llmDown || fatal != nil
 					mu.Unlock()
 					if !skip {
 						process(ids)
 					}
 					mu.Lock()
 					done += len(ids)
-					if opts.progress && (batchSize > 1 || done%25 == 0 || done == len(live)) {
+					if r.opts.progress && (batchSize > 1 || done%25 == 0 || done == len(live)) {
 						fmt.Printf("  %d/%d\n", done, len(live))
 					}
 					mu.Unlock()
@@ -431,43 +476,50 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		close(jobs)
 		wg.Wait()
 		if fatal != nil {
-			return st, fatal
+			return fatal
 		}
-		if areaOverrides > 0 && opts.progress {
+		if areaOverrides > 0 && r.opts.progress {
 			fmt.Printf("%d of %d answers named an area other than the fixed one — the category won\n",
-				areaOverrides, st.llmNew)
+				areaOverrides, r.st.llmNew)
 		}
 	}
-	if len(parseWarnings) > 0 {
+	if len(r.parseWarnings) > 0 {
 		fmt.Fprintf(os.Stderr, "warning: %d LLM replies rejected (single-request fallback ran where possible), first %d:\n",
-			len(parseWarnings), min(len(parseWarnings), 3))
-		for _, w := range parseWarnings[:min(len(parseWarnings), 3)] {
+			len(r.parseWarnings), min(len(r.parseWarnings), 3))
+		for _, w := range r.parseWarnings[:min(len(r.parseWarnings), 3)] {
 			fmt.Fprintf(os.Stderr, "  %s\n", w)
 		}
 	}
+	r.st.llmDown = r.llmDown
+	return nil
+}
+
+// write is stage 4: collect what every stage decided, join it back onto the
+// watch events, and rewrite classified.jsonl — plus the summary line, which
+// reads the joined rows and so lives with them.
+func (r *pass) write() error {
 	// Whatever the LLM did not answer still keeps the area its YouTube
 	// category gives it. That fact does not depend on a model being up, on
 	// -no-llm or on -llm-limit — only the sub and the mode do, and the source
 	// says which half is missing. Without this the whole redesign would hand
 	// the area back to the LLM through the back door.
 	categoryOnly := 0
-	for id, item := range items {
-		if _, done := verdicts[id]; done || item.Area == "" {
+	for id, item := range r.items {
+		if _, done := r.verdicts[id]; done || item.Area == "" {
 			continue
 		}
-		verdicts[id] = videoVerdict{topic: item.Area, source: "category"}
+		r.verdicts[id] = videoVerdict{topic: item.Area, source: "category"}
 		categoryOnly++
 	}
-	if categoryOnly > 0 && opts.progress {
+	if categoryOnly > 0 && r.opts.progress {
 		fmt.Printf("%d videos carry their category's area but no sub or mode yet\n", categoryOnly)
 	}
 
-	st.llmDown = llmDown
-	st.classified = len(verdicts)
+	r.st.classified = len(r.verdicts)
 
 	// Join verdicts back onto every watch event.
 	var out []classify.Verdict
-	for _, v := range views {
+	for _, v := range r.views {
 		row := classify.Verdict{
 			VideoID:   v.VideoID,
 			Title:     v.Title,
@@ -477,7 +529,7 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 			Topic:     "unclear",
 			Source:    "unclassified",
 		}
-		if m, ok := metas[v.VideoID]; ok {
+		if m, ok := r.metas[v.VideoID]; ok {
 			row.DurationS = m.Duration
 			row.Unavailable = m.Unavailable
 			row.GoneReason = m.GoneReason
@@ -494,39 +546,39 @@ func classifyPass(p paths, cfg *rules.Config, views []takeout.View, metas map[st
 		if v.VideoID == "" {
 			// No video ID (deleted/private): still give the rules a shot at
 			// the takeout title/channel.
-			if topic, mode, ruleID, ok := cfg.Match(rules.Input{Title: v.Title, Channel: v.Channel}); ok {
+			if topic, mode, ruleID, ok := r.cfg.Match(rules.Input{Title: v.Title, Channel: v.Channel}); ok {
 				row.Topic, row.Mode, row.Source = topic, mode, "rule:"+ruleID
 			}
-		} else if vv, ok := verdicts[v.VideoID]; ok {
+		} else if vv, ok := r.verdicts[v.VideoID]; ok {
 			row.Topic, row.Mode, row.Source, row.Confidence = vv.topic, vv.mode, vv.source, vv.confidence
 		}
 		out = append(out, row)
 	}
-	if err := writeJSONL(p.classifiedJSONL(), out); err != nil {
-		return st, err
+	if err := writeJSONL(r.p.classifiedJSONL(), out); err != nil {
+		return err
 	}
 
-	if opts.progress {
+	if r.opts.progress {
 		bySource := map[string]int{}
-		for _, r := range out {
+		for _, row := range out {
 			switch {
-			case strings.HasPrefix(r.Source, "rule:"):
+			case strings.HasPrefix(row.Source, "rule:"):
 				bySource["rule"]++
-			case strings.HasPrefix(r.Source, "llm:"):
+			case strings.HasPrefix(row.Source, "llm:"):
 				bySource["llm"]++
-			case r.Source == "category":
+			case row.Source == "category":
 				bySource["category"]++
 			default:
 				bySource["unclassified"]++
 			}
 		}
 		fmt.Printf("wrote %s: %d views (%d via rules, %d via llm, %d area-only from the category, %d unclassified)\n",
-			p.classifiedJSONL(), len(out), bySource["rule"], bySource["llm"], bySource["category"], bySource["unclassified"])
-		if llmDown && bySource["unclassified"] > 0 && !opts.noLLM {
+			r.p.classifiedJSONL(), len(out), bySource["rule"], bySource["llm"], bySource["category"], bySource["unclassified"])
+		if r.llmDown && bySource["unclassified"] > 0 && !r.opts.noLLM {
 			fmt.Println("rerun \"classify\" once oMLX is up to fill the gap — verdicts are cached.")
 		}
 	}
-	return st, nil
+	return nil
 }
 
 func loadRules(path string) (*rules.Config, error) {
