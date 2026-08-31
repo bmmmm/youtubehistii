@@ -22,7 +22,8 @@ youtubehistii report                              → data/out/report.csv + term
 youtubehistii watchpath                           → data/out/watchpath.html (incl. #/report)
 youtubehistii watchpath -label-holes 150           name the deepest rabbit holes (cached)
 
-youtubehistii run      all of enrich + classify + report in one go, overlapped
+youtubehistii run      all of enrich + classify + report + page in one go, overlapped
+                       (takes -taxonomy and -label-holes, same as the stages above)
 youtubehistii inspect  what the metadata cache holds — category distribution and
                        creator tags, to decide the taxonomy from the data
                        (read-only, never asks a model)
@@ -90,9 +91,11 @@ your server actually decodes requests in parallel — measure first).
 `run` is Ctrl-C safe and resumable: all progress lives in the per-video
 caches, and a restart picks up where it stopped. An oMLX outage only skips
 the current wave — enrich keeps running and the next wave retries. When
-enrich finishes, a final pass classifies the rest and the report renders
-(with the `-no-names` terminal summary). For a long unattended run on macOS:
-`caffeinate -is ./youtubehistii run`.
+enrich finishes, a final pass classifies the rest, the terminal summary
+prints (`-no-names`) and the page is written — `run` ends where `watchpath`
+would. It takes `-taxonomy` and `-label-holes N` and hands both to that last
+step, so one command covers the whole pipeline. For a long unattended run on
+macOS: `caffeinate -is ./youtubehistii run`.
 
 ## Getting your data
 

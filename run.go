@@ -21,6 +21,7 @@ func cmdRun(args []string) error {
 	fs, dataDir := newFlagSet("run")
 	ef := addEnrichFlags(fs)
 	lf := addLLMFlags(fs)
+	wf := addWatchPathFlags(fs)
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -172,5 +173,18 @@ loop:
 	if enrichErr != nil {
 		return fmt.Errorf("enrich: %w (classification progress is cached — rerun \"run\" to resume)", enrichErr)
 	}
-	return cmdReport([]string{"-data", p.dataDir, "-no-names"})
+	// Both stages read the SAME taxonomy switch: a terminal summary folded
+	// differently from the page it points at would be two answers to one
+	// question.
+	reportArgs := []string{"-data", p.dataDir, "-no-names"}
+	if *wf.useTaxonomy {
+		reportArgs = append(reportArgs, "-taxonomy")
+	}
+	if err := cmdReport(reportArgs); err != nil {
+		return err
+	}
+	// The page last, so its path is the final line — it is what the run was
+	// for. Before ca1703d "report" wrote one and this was covered by the line
+	// above; since then it did not, and nothing here noticed.
+	return writeWatchPath(p, *lf.rulesPath, wf.opts())
 }

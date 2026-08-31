@@ -4,6 +4,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,17 +23,47 @@ import (
 // the timeline, the calendar and the topic tree existed.
 func cmdWatchPath(args []string) error {
 	fs, dataDir := newFlagSet("watchpath")
-	useTaxonomy := fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path")
 	rulesPath := fs.String("rules", "", "rules file — only read for the chat model behind -label-holes")
-	labelHolesN := fs.Int("label-holes", 0, "ask the chat model for a short name for the N deepest rabbit holes (0 = off; replies are cached, a rerun asks nothing)")
+	wf := addWatchPathFlags(fs)
 	fs.Parse(args)
-	p := paths{dataDir: *dataDir}
+	return writeWatchPath(paths{dataDir: *dataDir}, *rulesPath, wf.opts())
+}
 
+// watchPathFlags are the page flags shared by "watchpath" and "run". "run"
+// owns -rules already (the LLM stage needs it), so it is not in here.
+type watchPathFlags struct {
+	useTaxonomy *bool
+	labelHoles  *int
+}
+
+func addWatchPathFlags(fs *flag.FlagSet) watchPathFlags {
+	return watchPathFlags{
+		useTaxonomy: fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path"),
+		labelHoles:  fs.Int("label-holes", 0, "ask the chat model for a short name for the N deepest rabbit holes (0 = off; replies are cached, a rerun asks nothing)"),
+	}
+}
+
+// pageOpts is what writeWatchPath needs, past the paths and the rules file.
+type pageOpts struct {
+	useTaxonomy bool
+	labelHoles  int
+}
+
+func (wf watchPathFlags) opts() pageOpts {
+	return pageOpts{useTaxonomy: *wf.useTaxonomy, labelHoles: *wf.labelHoles}
+}
+
+// writeWatchPath renders the page and writes it. Split out of cmdWatchPath so
+// "run" can end on the page as well: it used to, back when "report" still
+// wrote an HTML file of its own, and lost it in ca1703d when the report moved
+// into the app — nothing in run.go was pulled along, and a full run has been
+// leaving the reader without the one page this tool makes ever since.
+func writeWatchPath(p paths, rulesPath string, o pageOpts) error {
 	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
 	if err != nil {
 		return fmt.Errorf("read classified views (run \"classify\" first): %w", err)
 	}
-	if *useTaxonomy {
+	if o.useTaxonomy {
 		if err := foldThroughTaxonomy(rows); err != nil {
 			return err
 		}
@@ -56,12 +87,12 @@ func cmdWatchPath(args []string) error {
 	// them the page names its chains after their depth and area, which is
 	// what it did before they existed.
 	var opts report.WatchPathOpts
-	if *labelHolesN > 0 {
-		cfg, err := loadRules(*rulesPath)
+	if o.labelHoles > 0 {
+		cfg, err := loadRules(rulesPath)
 		if err != nil {
 			return err
 		}
-		opts.HoleLabels = labelHoles(omlx.New(cfg.LLM.Model, cfg.LLM.BaseURL), p, path, *labelHolesN)
+		opts.HoleLabels = labelHoles(omlx.New(cfg.LLM.Model, cfg.LLM.BaseURL), p, path, o.labelHoles)
 	}
 
 	html, err := report.RenderWatchPathOpts(path, st, time.Now(), opts)
