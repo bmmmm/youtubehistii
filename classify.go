@@ -22,13 +22,14 @@ import (
 
 // llmFlags are the classification flags shared by "classify" and "run".
 type llmFlags struct {
-	rulesPath    *string
-	noLLM        *bool
-	llmLimit     *int
-	llmBatch     *int
-	llmWorkers   *int
-	keepVerdicts *bool
-	retry        *string
+	rulesPath         *string
+	noLLM             *bool
+	llmLimit          *int
+	llmBatch          *int
+	llmWorkers        *int
+	keepVerdicts      *bool
+	retry             *string
+	includeUnenriched *bool
 }
 
 func addLLMFlags(fs *flag.FlagSet) llmFlags {
@@ -41,9 +42,14 @@ func addLLMFlags(fs *flag.FlagSet) llmFlags {
 		keepVerdicts: fs.Bool("keep-verdicts", false, "keep cached verdicts even though the taxonomy changed (for a reworded desc — a changed area list needs a re-ask)"),
 		retry: fs.String("retry", "",
 			`re-ask cached verdicts by DEFECT: "no-sub" (area without a sub), "no-mode" (topic without a mode), "unclear" (only the ones with usable text), "topic:<exact>" (a topic that is present but wrong), "all", or a comma-separated list`),
+		includeUnenriched: fs.Bool("include-unenriched", false, "ask the LLM even about videos without cached metadata (title-only verdicts)"),
 	}
 }
 
+// opts deliberately leaves includeUnenriched alone. "classify" means it for
+// the one pass it runs; "run" means it only for the final sweep, after enrich
+// has had its chance — applying it wave after wave would burn title-only asks
+// on videos whose metadata is still on its way.
 func (lf llmFlags) opts() classifyOpts {
 	return classifyOpts{
 		noLLM:        *lf.noLLM,
@@ -58,7 +64,6 @@ func (lf llmFlags) opts() classifyOpts {
 func cmdClassify(args []string) error {
 	fs, dataDir := newFlagSet("classify")
 	lf := addLLMFlags(fs)
-	includeUnenriched := fs.Bool("include-unenriched", false, "ask the LLM even about videos without cached metadata (title-only verdicts)")
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
@@ -83,7 +88,7 @@ func cmdClassify(args []string) error {
 	}
 
 	opts := lf.opts()
-	opts.includeUnenriched = *includeUnenriched
+	opts.includeUnenriched = *lf.includeUnenriched
 	opts.progress = true
 	_, err = classifyPass(p, cfg, views, metas, cached, opts)
 	return err

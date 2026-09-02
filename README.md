@@ -23,10 +23,14 @@ youtubehistii watchpath                           → data/out/watchpath.html (i
 youtubehistii watchpath -label-holes 150           name the deepest rabbit holes (cached)
 
 youtubehistii run      all of enrich + classify + report + page in one go, overlapped
-                       (takes -taxonomy and -label-holes, same as the stages above)
+                       (takes the union of the enrich, classify and watchpath flags)
 youtubehistii inspect  what the metadata cache holds — category distribution and
                        creator tags, to decide the taxonomy from the data
                        (read-only, never asks a model)
+youtubehistii abtest   would another model on the server classify better? Asks two
+                       models the byte-identical production prompt on a deterministic
+                       sample; -judge lets a third decide the disagreements. Writes
+                       nothing, changes nothing.
 ```
 
 Each stage writes plain, inspectable files and can be re-run independently.
@@ -116,7 +120,8 @@ shown. Top-channel tables mark subscribed channels.
 
 ## Requirements
 
-- Go ≥ 1.26 (build), `yt-dlp` (enrich stage)
+- Go ≥ 1.26 (build), `yt-dlp` (enrich stage), `node` ≥ 24 (the page's own
+  test — see [Development](#development); not needed to use the tool)
 - an oMLX server for LLM classification (optional — without it, `classify`
   runs rules-only and says so). `taxonomy` additionally wants an *embedding*
   model on the same server (`bge-m3-mlx-fp16` by default, multilingual so
@@ -431,6 +436,35 @@ if the vanished videos were secretly a music block (plausible, music videos
 disappear constantly) they would be rewatched like music, roughly 1.5 times
 each. They are rewatched 1.1 times, mid-table with the talk-shaped
 categories — a cross-section, not a hidden category.
+
+## Development
+
+```
+scripts/check.sh
+```
+
+That is the whole gate, and CI runs the same script — so "green locally" and
+"green in CI" cannot mean different things. Six steps, in order:
+
+| step | what it catches |
+| --- | --- |
+| `gofmt` | formatting, over the files git tracks |
+| `go vet` | the standard suspicious-construct set |
+| `staticcheck` | pinned to v0.8.1 — a linter that updates itself picks its own day to turn the build red |
+| `go test` | the Go suite |
+| `go build` | with `-ldflags` stamping `git describe --tags` into `youtubehistii version` |
+| `pagecheck` | runs the generated page's own JavaScript under node |
+
+The last one is there because the Go tests build the page as a *string* and
+never execute a line of it. `pagecheck` does, and it once caught a syntax
+error that would have killed the page before its first line. The real page is
+somebody's watch history and gitignored, so `tools/pagefixture` invents one
+from arithmetic — deliberately past 300 chains and 300 days, because a smaller
+fixture passes whether the virtual list's old row cap is back or not.
+
+One sandbox note: `go test ./...` does not work in this repo's development
+sandbox, because the pattern walk enters `data/`, which is denied. `check.sh`
+carries the explicit package list instead; override it with `PKGS=. scripts/check.sh`.
 
 ## License
 

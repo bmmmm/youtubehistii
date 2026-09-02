@@ -175,6 +175,12 @@ loop:
 
 	// Final pass: everything has metadata or a tombstone now (minus transient
 	// enrich failures), then the report — names-free in the terminal.
+	//
+	// -include-unenriched applies HERE and nowhere earlier: enrich has had its
+	// whole run, so what is still without metadata will not get any. Set on
+	// every wave it would have spent title-only asks on videos whose metadata
+	// was still in flight.
+	baseOpts.includeUnenriched = *lf.includeUnenriched
 	if _, err := scan(); err != nil {
 		return err
 	}
