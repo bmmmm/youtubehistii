@@ -249,6 +249,30 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 	return out, runErr
 }
 
+// captureStderr is captureStdout's sibling. Notes and warnings go to stderr
+// on purpose — they must survive a pipe into a file — so a test that reads
+// only stdout cannot see them.
+func captureStderr(t *testing.T, fn func() error) (string, error) {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved := os.Stderr
+	os.Stderr = w
+	read := make(chan string, 1)
+	go func() {
+		b, _ := io.ReadAll(r)
+		read <- string(b)
+	}()
+	runErr := fn()
+	os.Stderr = saved
+	w.Close()
+	out := <-read
+	r.Close()
+	return out, runErr
+}
+
 func TestCmdTaxonomyEndToEnd(t *testing.T) {
 	var chatCalls int
 	rt := fakeOMLX(t, &chatCalls)

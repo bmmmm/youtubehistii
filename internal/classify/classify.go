@@ -68,9 +68,16 @@ type LLMVerdict struct {
 	Topic      string  `json:"topic"`
 	Mode       string  `json:"mode"`
 	Confidence float64 `json:"confidence"`
-	Model      string  `json:"model"`
-	Basis      string  `json:"basis,omitempty"`    // legacy entries without it count as title-only
-	Taxonomy   string  `json:"taxonomy,omitempty"` // rules.Config.Fingerprint at judgement time
+	// Model is the model behind the LAST COMPLETE judgement, not behind every
+	// field. A verdict that went through a "-retry no-sub" round under a
+	// different model carries area and mode from the first judge and sub and
+	// confidence from the second, and one string cannot say that — so the
+	// retry rounds deliberately leave this field alone (retry_test.go pins
+	// that). Read it as provenance for the whole answer only when no retry
+	// marker is set.
+	Model    string `json:"model"`
+	Basis    string `json:"basis,omitempty"`    // legacy entries without it count as title-only
+	Taxonomy string `json:"taxonomy,omitempty"` // rules.Config.Fingerprint at judgement time
 	// Retried names the targeted re-asks already run for this video ("sub",
 	// "mode", "context"), so a -retry pass is idempotent: a video the model
 	// STILL could not give a sub or a mode is not asked the same narrow

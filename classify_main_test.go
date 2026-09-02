@@ -585,3 +585,117 @@ func TestNextLineNamesOnlyTheSelectorsItCanFill(t *testing.T) {
 		t.Errorf("a pass with no missing subs offered -retry no-sub: %s", line)
 	}
 }
+
+// TestModelDriftWarnsOnlyWhenTheJudgeChanged: a verdict's cache key carries
+// the taxonomy fingerprint, not the model, so pointing the config at another
+// model invalidates nothing. The old judge's verdicts stay and the corpus
+// becomes two judges' work — which is a decision, not a defect, and so has to
+// be said out loud rather than fixed by re-asking 28k videos.
+func TestModelDriftWarnsOnlyWhenTheJudgeChanged(t *testing.T) {
+	cached := map[string]classify.LLMVerdict{
+		"a": {Model: "old-judge"},
+		"b": {Model: "old-judge"},
+		"c": {Model: "new-judge"},
+		// No model recorded: predates the field, and counting it would put a
+		// permanent number under a warning about a change nobody made.
+		"d": {},
+	}
+	drift := modelDrift(cached, "new-judge")
+	if len(drift) != 1 || drift["old-judge"] != 2 {
+		t.Fatalf("modelDrift = %v, want one entry old-judge:2", drift)
+	}
+	line := modelDriftLine(drift, "new-judge")
+	for _, want := range []string{"old-judge 2", "new-judge", `abtest -model new-judge`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("the line misses %q: %s", want, line)
+		}
+	}
+	// Never -retry all: that re-asks DEFECTS, and these verdicts have none.
+	// They are complete answers from a different judge.
+	if strings.Contains(line, "-retry") {
+		t.Errorf("the line offers a retry selector that would select nothing: %s", line)
+	}
+
+	// One judge, no drift, no line — a warning that fires on the normal case
+	// is a warning people learn to scroll past.
+	same := modelDrift(map[string]classify.LLMVerdict{"a": {Model: "one"}, "b": {}}, "one")
+	if len(same) != 0 {
+		t.Errorf("modelDrift on an unchanged model = %v, want empty", same)
+	}
+	if got := modelDriftLine(same, "one"); got != "" {
+		t.Errorf("an unchanged model still warned: %q", got)
+	}
+}
+
+// TestModelDriftIsSilentWithoutTheLLM: -no-llm means no model is going to be
+// asked anything, so which judge produced the cache is not a decision anybody
+// is making on this run.
+func TestModelDriftIsSilentWithoutTheLLM(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	cfg, err := rules.Load("config/rules.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := []takeout.View{{VideoID: "driftvideo1", Title: "some music", WatchedAt: time.Now()}}
+	if err := writeJSONL(p.historyJSONL(), views); err != nil {
+		t.Fatal(err)
+	}
+	cache := classify.Cache{Dir: p.classifyCache()}
+	if err := cache.Write("driftvideo1", classify.LLMVerdict{
+		Topic: "music/jazz", Mode: "consume", Model: "a-different-judge", Taxonomy: cfg.Fingerprint(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr, err := captureStderr(t, func() error {
+		return cmdClassify([]string{"-data", p.dataDir, "-rules", "config/rules.example.yaml", "-no-llm"})
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "model changed") {
+		t.Errorf("-no-llm still warned about the judge:\n%s", stderr)
+	}
+}
+
+// TestModelDriftWarnsFromTheCommand: the pure function above is only worth
+// having if the command actually reaches it. The rules file points at a host
+// that does not resolve, so the warning cannot be coming from anything the
+// server said — and the LLM stage going down must not swallow it either.
+func TestModelDriftWarnsFromTheCommand(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	rulesPath := filepath.Join(p.dataDir, "rules.yaml")
+	rulesYAML := "llm:\n  model: the-new-judge\n  base_url: http://offline.invalid/v1\n" +
+		"topics:\n  - id: music\n    desc: music\n  - id: unclear\n    desc: cannot tell\n"
+	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := rules.Load(rulesPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(p.historyJSONL(), []takeout.View{
+		{VideoID: "driftvideo2", Title: "some music", WatchedAt: time.Now()},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	cache := classify.Cache{Dir: p.classifyCache()}
+	if err := cache.Write("driftvideo2", classify.LLMVerdict{
+		Topic: "music/jazz", Mode: "consume", Model: "the-old-judge", Taxonomy: cfg.Fingerprint(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stderr, err := captureStderr(t, func() error {
+		_, runErr := captureStdout(t, func() error {
+			return cmdClassify([]string{"-data", p.dataDir, "-rules", rulesPath})
+		})
+		return runErr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "model changed (the-old-judge 1 → the-new-judge)") {
+		t.Errorf("the command never warned about the other judge:\n%s", stderr)
+	}
+}

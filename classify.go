@@ -86,6 +86,13 @@ func cmdClassify(args []string) error {
 	if err != nil {
 		return err
 	}
+	// Said once per command, not per pass: "run" classifies in waves and this
+	// would otherwise repeat every 60 seconds for hours.
+	if !*lf.noLLM {
+		if line := modelDriftLine(modelDrift(cached, cfg.LLM.Model), cfg.LLM.Model); line != "" {
+			fmt.Fprintln(os.Stderr, line)
+		}
+	}
 
 	opts := lf.opts()
 	opts.includeUnenriched = *lf.includeUnenriched
@@ -162,6 +169,39 @@ func (s passStats) nextLine() string {
 	}
 	parts = append(parts, `then "taxonomy", then "watchpath -taxonomy"`)
 	return "next: " + strings.Join(parts, "; ")
+}
+
+// modelDrift counts the cached verdicts each OTHER model produced.
+//
+// A verdict's cache key carries the taxonomy fingerprint, not the model. Point
+// the config at a different model and nothing is invalidated: the old judge's
+// verdicts stay, the new one answers only what is new, and the corpus becomes
+// two judges' work with no field able to say which is which. That is not a bug
+// to fix by re-asking — 28k videos is five hours — but it must not be silent.
+//
+// Verdicts with no model recorded are skipped: they predate the field, and
+// counting them would put a permanent number under a warning about a change
+// nobody made.
+func modelDrift(cached map[string]classify.LLMVerdict, want string) map[string]int {
+	out := map[string]int{}
+	for _, v := range cached {
+		if v.Model == "" || v.Model == want {
+			continue
+		}
+		out[v.Model]++
+	}
+	return out
+}
+
+// modelDriftLine names the way out that does not cost five hours. Not
+// "-retry all": that re-asks defects, and these verdicts have none — they are
+// answers from a different judge, which is a different thing entirely.
+func modelDriftLine(drift map[string]int, want string) string {
+	if len(drift) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("model changed (%s → %s): those verdicts keep the old judge and nothing is re-asked — \"abtest -model %s\" measures the difference without touching the cache",
+		formatCounts(drift), want, want)
 }
 
 // classifyPass runs one full classification over views: rules first, then the
