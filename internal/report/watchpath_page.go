@@ -1025,7 +1025,12 @@ function route() {
 document.getElementById("head").textContent =
   "generated {{.Generated}} · {{date .P.From}} … {{date .P.To}} · " +
   D.views.toLocaleString() + " views in " + D.sessions.toLocaleString() + " sessions" +
-  (D.dropped ? " · " + D.dropped.toLocaleString() + " without a timestamp left off" : "");
+  (D.dropped ? " · " + D.dropped.toLocaleString() + " without a timestamp left off" : "") +
+  // Which projection these topics were folded through. Rendered in Go like
+  // the dates beside it, not read off D: the head line is a server-side
+  // string here, and the full provenance stays in D.taxonomy for whoever
+  // wants the path and the mtime.
+  "{{.Taxonomy}}";
 
 addEventListener("hashchange", route);
 if (!D.rows.length) {

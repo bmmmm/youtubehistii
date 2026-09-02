@@ -536,6 +536,58 @@ func TestRenderWatchPathWithoutStats(t *testing.T) {
 	}
 }
 
+// TestRenderWatchPathShowsWhichTaxonomyItRanOn: the provenance has been on the
+// payload since it existed and shown nowhere, and a field no reader can reach
+// is not a field. The CSV carries it in its first line and the terminal prints
+// it; two artefacts of one run that disagree about their topics have to be
+// tellable apart, and the page is the third.
+//
+// The assertion looks OUTSIDE the payload on purpose. Reading it back out of
+// the JSON would prove the same thing a second time and nothing new.
+func TestRenderWatchPathShowsWhichTaxonomyItRanOn(t *testing.T) {
+	const provenance = "sha256:abc123abc123 config/taxonomy.yaml 2026-09-01T01:12:39Z"
+	p := BuildPath(pathFixture())
+
+	html, err := RenderWatchPathOpts(p, Aggregate(pathFixture(), nil), pathT0,
+		WatchPathOpts{Taxonomy: provenance})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mustPayload(t, html)), provenance) {
+		t.Error("the full provenance left the payload")
+	}
+	visible := withoutPayload(t, html)
+	if !strings.Contains(visible, "taxonomy sha256:abc123abc123") {
+		t.Error("the page renders the provenance nowhere a reader can see it")
+	}
+	// Short form. The head line sits beside the dates and the counts, and a
+	// path plus an RFC3339 stamp would push them off it.
+	if strings.Contains(visible, "config/taxonomy.yaml") {
+		t.Error("the head line carries the whole provenance string")
+	}
+
+	// An unfolded run must not announce a projection that did not happen —
+	// taxonomyProvenance answers "none" there, and "· taxonomy none" on every
+	// such page is noise.
+	none, err := RenderWatchPathOpts(p, Aggregate(pathFixture(), nil), pathT0,
+		WatchPathOpts{Taxonomy: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(withoutPayload(t, none), "taxonomy none") {
+		t.Error("an unfolded page announced a taxonomy anyway")
+	}
+}
+
+// withoutPayload is the page with the JSON blob cut out, so an assertion can
+// tell "a reader sees it" apart from "the payload carries it".
+func withoutPayload(t *testing.T, html []byte) string {
+	t.Helper()
+	payload := mustPayload(t, html)
+	i := bytes.Index(html, payload)
+	return string(html[:i]) + string(html[i+len(payload):])
+}
+
 func TestPathDataInternsRepeats(t *testing.T) {
 	// The same channel across many views must cost one string, not many —
 	// that is the whole reason for the lookup tables.

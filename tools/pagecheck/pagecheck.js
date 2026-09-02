@@ -381,6 +381,20 @@ if (D.holeLabels) {
   skip("the model's names: this page carries no hole labels");
 }
 
+// ---- provenance ---------------------------------------------------------
+// The head line has to say which projection the rows were folded through.
+// The CSV says it and the terminal says it; the page carried it in the
+// payload where no reader could reach it.
+if (D.taxonomy && D.taxonomy.startsWith("sha256:")) {
+  const digest = D.taxonomy.split(" ")[0];
+  ok("the head line names the taxonomy the page ran on",
+     ids.head.textContent.includes(digest), ids.head.textContent);
+  ok("the head line keeps the short form, not the path and the mtime",
+     !ids.head.textContent.includes(D.taxonomy));
+} else {
+  skip("the head line's provenance: this page was not folded through a taxonomy");
+}
+
 let line = (fail ? "FAILED" : "ALL PASS") + ": " + pass + " checks passed, " + fail + " failed";
 if (skips.length) line += ", " + skips.length + " group(s) skipped (" + skips.join("; ") + ")";
 console.log(line);

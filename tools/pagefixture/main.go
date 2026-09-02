@@ -192,7 +192,15 @@ func main() {
 		labels[i] = fmt.Sprintf("fixture hole %d", i)
 	}
 
-	html, err := report.RenderWatchPathOpts(p, report.Aggregate(rows, nil), t0, report.WatchPathOpts{HoleLabels: labels})
+	// A provenance too, for the same reason as the labels: without one the
+	// head-line check takes its "not folded" branch and the fixture stops
+	// being able to express the property CI is supposed to be guarding.
+	const provenance = "sha256:f1x7u1e00000 config/taxonomy.yaml 2026-09-01T00:00:00Z"
+
+	html, err := report.RenderWatchPathOpts(p, report.Aggregate(rows, nil), t0, report.WatchPathOpts{
+		HoleLabels: labels,
+		Taxonomy:   provenance,
+	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pagefixture:", err)
 		os.Exit(1)

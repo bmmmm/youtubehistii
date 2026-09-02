@@ -9,6 +9,7 @@ import (
 	"hash/fnv"
 	"html/template"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -457,6 +458,18 @@ func RenderWatchPathOpts(p *Path, st *Stats, generated time.Time, o WatchPathOpt
 			data.HoleLabels = append(data.HoleLabels, []any{ci, o.HoleLabels[ci]})
 		}
 	}
+	// What the head line says about the projection. Short form: the digest
+	// alone tells two taxonomies apart by eye, and the path and the mtime
+	// stay one keystroke away in the payload.
+	//
+	// Empty unless a projection actually ran. taxonomyProvenance answers
+	// "none" for an unfolded run, and "· taxonomy none" on every such page
+	// would be noise about a thing that did not happen.
+	head := ""
+	if strings.HasPrefix(o.Taxonomy, "sha256:") {
+		head = " · taxonomy " + strings.Fields(o.Taxonomy)[0]
+	}
+
 	raw, err := json.Marshal(data)
 	if err != nil {
 		return nil, err
@@ -482,6 +495,7 @@ func RenderWatchPathOpts(p *Path, st *Stats, generated time.Time, o WatchPathOpt
 		"RowHeight":  rowHeightPx,
 		"RankHeight": rankRowPx,
 		"Generated":  generated.Format("2006-01-02 15:04"),
+		"Taxonomy":   head,
 		"SessionGap": fmt.Sprintf("%.0f", sessionGap.Minutes()),
 		"LongVideo":  fmt.Sprintf("%d", longVideoS/60),
 		"RabbitLen":  fmt.Sprintf("%d", rabbitMinLen),
