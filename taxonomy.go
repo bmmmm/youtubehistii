@@ -5,7 +5,9 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -114,6 +116,7 @@ func cmdTaxonomy(args []string) error {
 		return err
 	}
 	defer log.close()
+	log.logRunStart(fs)
 
 	baseline := taxonomy.MeasureLabels(labels, *tailN)
 	log.event("collect", map[string]any{"labels": len(labels), "views": len(views)})
@@ -220,10 +223,51 @@ func cmdTaxonomy(args []string) error {
 	log.event("naming", nameStats.Detail())
 	log.event("timing", timer.spans)
 	fmt.Printf("wrote %s (%d subjects under %d top levels)\n", *taxFile, len(subjects), last.Tops)
+	regenerateLeakPatterns(os.Stderr, *taxFile)
 	fmt.Printf("naming     %s\n", nameStats.Line())
 	fmt.Printf("timing     %s\n", timer.line())
 	fmt.Println("compare with: youtubehistii report -taxonomy / watchpath -taxonomy")
 	return nil
+}
+
+// regenerateLeakPatterns keeps the pre-commit and pre-push gates in step with
+// the file that was just written. The patterns are derived from the taxonomy's
+// subjects — one person's real watch history — so a taxonomy run is exactly
+// the moment they go stale, and a stale pattern file protects nothing that was
+// added since while reporting success. That shape cost a history rewrite on
+// 2026-08-28 and four more blind days after it.
+//
+// Three conditions, each for its own reason:
+//
+//   - only for the DEFAULT taxonomy. A -taxonomy-file run writes somewhere
+//     else, and regenerating from it would leave the patterns describing a
+//     file the gates do not read.
+//   - only inside a repo. os.Stat(".git") rather than IsDir, because in a
+//     worktree .git is a file.
+//   - only when the script is there. A binary installed away from its source
+//     tree has nothing to run and nothing to say about it.
+//
+// Never fatal: the taxonomy is written either way, and the gates fail closed
+// on their own. A failure names the command so it can be run by hand.
+func regenerateLeakPatterns(w io.Writer, taxFile string) {
+	const script = "scripts/gen-leak-patterns.sh"
+	if taxFile != taxonomyPath {
+		fmt.Fprintf(w, "note: leak patterns are derived from %s, not from %s — not regenerated\n", taxonomyPath, taxFile)
+		return
+	}
+	if _, err := os.Stat(".git"); err != nil {
+		return
+	}
+	if _, err := os.Stat(script); err != nil {
+		return
+	}
+	// stdout is passed through: the script prints counts only, never values.
+	out, err := exec.Command("bash", script).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(w, "warning: could not regenerate the leak patterns (%v) — run %s before committing\n%s\n", err, script, out)
+		return
+	}
+	fmt.Fprint(w, string(out))
 }
 
 // warmThenTime runs the same call twice and returns both durations. oMLX

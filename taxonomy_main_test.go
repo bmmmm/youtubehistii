@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -551,5 +552,132 @@ func TestNamerRetriesABadBatchSingly(t *testing.T) {
 	}
 	if stats.Subject.Requests != 4 || stats.Subject.Misses != 3 {
 		t.Errorf("stats = %d uncached in %d requests, want 3 in 4", stats.Subject.Misses, stats.Subject.Requests)
+	}
+}
+
+// TestRunLogAppendsAcrossRuns: the run log is how a threshold calibration is
+// read back — round metrics from one setting against another. os.Create
+// truncated it, so every run erased the run it was meant to be compared
+// against, and the loss was silent because a fresh file looks like a fresh
+// run. The "run" event is what makes the appended stream separable again.
+func TestRunLogAppendsAcrossRuns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run.jsonl")
+	for i := range 2 {
+		log, err := newRunLog(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fs := flag.NewFlagSet("taxonomy", flag.ContinueOnError)
+		fs.Int("rounds", 10, "")
+		fs.Float64("fine", 0.70, "")
+		if err := fs.Parse([]string{"-rounds", fmt.Sprint(3 + i)}); err != nil {
+			t.Fatal(err)
+		}
+		log.logRunStart(fs)
+		log.event("write", map[string]any{"n": i})
+		log.close()
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(b)), "\n")
+	if len(lines) != 4 {
+		t.Fatalf("run log has %d lines, want 4 — the second run truncated the first", len(lines))
+	}
+	var first struct {
+		Event  string `json:"event"`
+		Detail struct {
+			Version string            `json:"version"`
+			Flags   map[string]string `json:"flags"`
+		} `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(lines[0]), &first); err != nil {
+		t.Fatal(err)
+	}
+	if first.Event != "run" {
+		t.Errorf("first event = %q, want \"run\"", first.Event)
+	}
+	if first.Detail.Version == "" {
+		t.Error("the run event carries no version — two runs of different binaries read alike")
+	}
+	// Only what was SET. The defaults are in the binary and in the usage
+	// text; repeating fourteen of them would bury the one that changed.
+	if got := first.Detail.Flags["rounds"]; got != "3" {
+		t.Errorf("flags[rounds] = %q, want 3", got)
+	}
+	if _, ok := first.Detail.Flags["fine"]; ok {
+		t.Error("an untouched flag was logged as if it had been chosen")
+	}
+}
+
+// TestRunLeakPatternsNeedsARepoAndTheScript: the patterns are derived from the
+// taxonomy's subjects, so a taxonomy run is exactly when they go stale — but
+// the regeneration must stay inert wherever it cannot help. A binary run
+// outside its source tree has no script, and a directory that is not a repo
+// has no .git/leak-patterns to write.
+func TestRunLeakPatternsNeedsARepoAndTheScript(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	var out strings.Builder
+	regenerateLeakPatterns(&out, taxonomyPath)
+	if out.String() != "" {
+		t.Errorf("outside a repo, the regeneration still spoke: %q", out.String())
+	}
+
+	// A repo, still no script: the binary is installed away from its source.
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	regenerateLeakPatterns(&out, taxonomyPath)
+	if out.String() != "" {
+		t.Errorf("without the script, the regeneration still spoke: %q", out.String())
+	}
+
+	// Both there: the script runs and its output is passed through. A stub
+	// stands in — the real one reads a taxonomy that is nobody's business
+	// here, and this test is about the wiring, not the generator.
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/usr/bin/env bash\nprintf 'gen-leak-patterns: 7 subjects, 2 allowed, 5 patterns\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "gen-leak-patterns.sh"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	regenerateLeakPatterns(&out, taxonomyPath)
+	if !strings.Contains(out.String(), "5 patterns") {
+		t.Errorf("the script ran but its counts were swallowed: %q", out.String())
+	}
+}
+
+// TestRunLeakPatternsRefusesANonDefaultTaxonomyFile: -taxonomy-file writes
+// somewhere the gates do not read. Regenerating from it would leave the
+// patterns describing a file nothing checks — a gate pointed at the wrong
+// source is worse than a stale one, because it looks deliberate.
+func TestRunLeakPatternsRefusesANonDefaultTaxonomyFile(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: elsewhere\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "scripts"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stub := "#!/usr/bin/env bash\nprintf 'THE STUB RAN\\n'\n"
+	if err := os.WriteFile(filepath.Join(dir, "scripts", "gen-leak-patterns.sh"), []byte(stub), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	regenerateLeakPatterns(&out, "somewhere/else.yaml")
+	if strings.Contains(out.String(), "THE STUB RAN") {
+		t.Error("a -taxonomy-file run regenerated the patterns for a file the gates do not read")
+	}
+	if !strings.Contains(out.String(), taxonomyPath) {
+		t.Errorf("the note does not name the file the patterns come from: %q", out.String())
 	}
 }
