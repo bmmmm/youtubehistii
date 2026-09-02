@@ -170,6 +170,13 @@ func taxonomyProvenance(file string) string {
 // it projects. Nothing fails: the fold still works and the newer topics pass
 // through. But a report that silently under-describes looks exactly like a
 // report that describes everything, and the run that produced it took hours.
+//
+// A PROXY, and only used where nothing better exists — the preflight, which
+// folds no rows and runs before the hours start. Once rows are folded, the
+// count of unknown topics is the ground truth and this comparison is not just
+// redundant but wrong: "run -taxonomy" classifies first and folds second, so
+// classified.jsonl is newer than the taxonomy by construction on every single
+// run, and the note fired every time while the fold found nothing missing.
 func warnIfTaxonomyIsBehind(w io.Writer, p paths, file string) {
 	tax, err1 := os.Stat(file)
 	cls, err2 := os.Stat(p.classifiedJSONL())
@@ -192,7 +199,10 @@ func foldThroughTaxonomy(p paths, file string, rows []classify.Verdict) (foldSta
 	if err != nil {
 		return st, fmt.Errorf("read %s (run \"taxonomy\" first): %w", file, err)
 	}
-	warnIfTaxonomyIsBehind(os.Stderr, p, file)
+	if len(rows) == 0 {
+		warnIfTaxonomyIsBehind(os.Stderr, p, file)
+		return st, nil
+	}
 
 	// Memoized on the PRE-fold topic. The projection is a map lookup, so this
 	// is not about speed — it is what makes the counts per topic instead of

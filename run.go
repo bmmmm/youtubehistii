@@ -3,6 +3,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -44,8 +45,23 @@ func cmdRun(args []string) error {
 	// the first second. Folding an empty slice loads the file and touches
 	// nothing.
 	if *wf.useTaxonomy {
-		if _, err := foldThroughTaxonomy(p, *wf.taxonomyFile, nil); err != nil {
+		// Folded against what is ALREADY classified, not against nil: that
+		// turns the preflight from a file-time proxy into a count. The clock
+		// cannot answer this one, because a run classifies before it folds —
+		// classified.jsonl is newer than the taxonomy by construction every
+		// time. A lower bound, since this run will add topics of its own, but
+		// a lower bound that is true beats a comparison that is not.
+		prior, err := readJSONL[classify.Verdict](p.classifiedJSONL())
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
+		}
+		st, err := foldThroughTaxonomy(p, *wf.taxonomyFile, prior)
+		if err != nil {
+			return err
+		}
+		if st.unknown > 0 {
+			fmt.Fprintf(os.Stderr, "note: %d already-classified topics (%d views) are not in %s — running \"taxonomy\" first would fold them too\n",
+				st.unknown, st.unknownViews, *wf.taxonomyFile)
 		}
 	}
 	views, err := readJSONL[takeout.View](p.historyJSONL())

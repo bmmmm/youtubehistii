@@ -271,6 +271,57 @@ func TestFoldWarnsWhenTheTaxonomyIsOlderThanTheVerdicts(t *testing.T) {
 	}
 }
 
+// TestFoldWithRowsLetsTheCountSpeakInsteadOfTheClock: "run -taxonomy"
+// classifies first and folds second, so classified.jsonl is newer than the
+// taxonomy on every single run. The mtime note fired every time while the fold
+// found nothing missing — a warning that fires on the normal case is one
+// people learn to scroll past. Where rows are folded, the count is the truth.
+func TestFoldWithRowsLetsTheCountSpeakInsteadOfTheClock(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	taxFile := filepath.Join(t.TempDir(), "taxonomy.yaml")
+	writeTaxonomyFile(t, taxFile, map[string]string{"music/jazz": "sound/jazz"})
+	if err := writeJSONL(p.classifiedJSONL(), []classify.Verdict{{VideoID: "a", Topic: "music/jazz"}}); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(taxFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st foldStats
+	stderr, err := captureStderr(t, func() error {
+		var ferr error
+		st, ferr = foldThroughTaxonomy(p, taxFile, rows)
+		return ferr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "is newer than") {
+		t.Errorf("a fold that found every topic still complained about the clock:\n%s", stderr)
+	}
+	if st.folded != 1 || st.unknown != 0 {
+		t.Errorf("foldStats = %+v, want 1 folded and nothing unknown", st)
+	}
+
+	// The preflight has no rows to count, so the clock is all it has — and it
+	// runs before the hours, which is the whole reason it exists.
+	stderr, err = captureStderr(t, func() error {
+		_, ferr := foldThroughTaxonomy(p, taxFile, nil)
+		return ferr
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "is newer than") {
+		t.Errorf("the preflight lost its only signal:\n%s", stderr)
+	}
+}
+
 // TestTaxonomyFileFlagLeavesTheConstantBehind: -taxonomy-file exists so a
 // second taxonomy can be compared against the first without moving files
 // around. The test runs in a directory with NO config/taxonomy.yaml, so a
