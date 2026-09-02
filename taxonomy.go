@@ -33,6 +33,11 @@ const (
 	defaultRounds = 10
 )
 
+// newOMLXClient is the seam classifyOpts.newClient is on the classify side:
+// the sandbox denies httptest.NewServer its bind, so the only mock that can
+// drive cmdTaxonomy end to end is an http.RoundTripper handed in from a test.
+var newOMLXClient = omlx.New
+
 func cmdTaxonomy(args []string) error {
 	fs, dataDir := newFlagSet("taxonomy")
 	rulesPath := fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)")
@@ -58,7 +63,7 @@ func cmdTaxonomy(args []string) error {
 	if err != nil {
 		return err
 	}
-	client := omlx.New(cfg.LLM.Model, cfg.LLM.BaseURL)
+	client := newOMLXClient(cfg.LLM.Model, cfg.LLM.BaseURL)
 
 	if *probe {
 		return probeRun(client, *embedModel, p)

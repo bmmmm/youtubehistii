@@ -29,7 +29,13 @@ import (
 // — sharing the family's axis and adding one of its own. That makes a family
 // cluster wide enough for the radius trigger to tear it apart, which is the
 // shape both defects live in.
-func fakeOMLX(t *testing.T, chatCalls *int) *httptest.Server {
+//
+// It hands back a RoundTripper rather than a server. The routing is the same
+// ServeMux either way, but a recorder never opens a socket, and this sandbox
+// denies httptest.NewServer its bind — with a server here the one test that
+// exercises cmdTaxonomy from end to end could only ever run in CI, which is
+// the same as saying it could not be used while changing the thing it covers.
+func fakeOMLX(t *testing.T, chatCalls *int) http.RoundTripper {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, `{"data":[{"id":"test-chat"},{"id":"test-embed"}]}`)
@@ -91,15 +97,19 @@ func fakeOMLX(t *testing.T, chatCalls *int) *httptest.Server {
 		}
 		fmt.Fprintf(w, `{"choices":[{"message":{"content":%q}}]}`, name)
 	})
-	return httptest.NewServer(mux)
+	return roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, r)
+		return rec.Result(), nil
+	})
 }
 
 // fakeChatTransport answers every chat/completions request with one fixed
 // reply, entirely in-process: http.Client hands the request straight to
-// RoundTrip and never opens a socket, so this works even though this
-// sandbox denies httptest.NewServer's bind ("bind: operation not
-// permitted") — the same reason TestCmdTaxonomyEndToEnd (which does use
-// httptest, via fakeOMLX) cannot run here.
+// RoundTrip and never opens a socket, so this works even though this sandbox
+// denies httptest.NewServer's bind ("bind: operation not permitted").
+// fakeOMLX takes the same route for the same reason; this one skips the mux
+// because a single canned answer needs no routing.
 type fakeChatTransport struct {
 	calls *int
 	reply string
@@ -240,8 +250,14 @@ func captureStdout(t *testing.T, fn func() error) (string, error) {
 
 func TestCmdTaxonomyEndToEnd(t *testing.T) {
 	var chatCalls int
-	srv := fakeOMLX(t, &chatCalls)
-	defer srv.Close()
+	rt := fakeOMLX(t, &chatCalls)
+	// The client the command builds for itself is replaced wholesale: only
+	// the transport is fake, so flag parsing, rules loading, embedding,
+	// naming and the write all run for real.
+	newOMLXClient = func(model, baseURL string) *omlx.Client {
+		return &omlx.Client{BaseURL: baseURL, Model: model, HTTP: &http.Client{Transport: rt}}
+	}
+	t.Cleanup(func() { newOMLXClient = omlx.New })
 
 	// The taxonomy and its run log land relative to the working directory,
 	// exactly like config/rules.yaml — so the test runs in its own.
@@ -249,7 +265,7 @@ func TestCmdTaxonomyEndToEnd(t *testing.T) {
 	dataDir := t.TempDir()
 
 	rulesPath := filepath.Join(dataDir, "rules.yaml")
-	rulesYAML := "llm:\n  model: test-chat\n  base_url: " + srv.URL + "/v1\n"
+	rulesYAML := "llm:\n  model: test-chat\n  base_url: http://oml.invalid/v1\n"
 	if err := os.WriteFile(rulesPath, []byte(rulesYAML), 0o644); err != nil {
 		t.Fatal(err)
 	}
