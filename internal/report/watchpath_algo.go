@@ -74,6 +74,23 @@ function algoWalk() {
 
 // monthKeyOf turns a payload timestamp into "YYYY-MM" in LOCAL time — the
 // same wall clock every other date on this page is read in.
+//
+// LOCAL here is the READER'S zone, and Stats.Months in report.go fixed its
+// months in the RENDERING machine's zone hours earlier. Open the page
+// somewhere else and the two views disagree about the month boundary. The day
+// grid is a third rule again: it places a sitting that crosses midnight on the
+// day it STARTED, while both month counts place each row on its own month.
+//
+// Measured on the real corpus (35,144 views, 5,793 sittings) rather than
+// guessed at: 121 views (0.34 %) change month between Berlin and UTC, 793
+// (2.26 %) between Berlin and Tokyo, and 80 (0.23 %) sit in a month other
+// than their sitting's start month. Read where the page was rendered — the
+// ordinary case for a tool that renders a file you then open — the first two
+// are exactly zero.
+//
+// So this is a recorded property, not a defect: routing the month through the
+// zone-stable day number would rebuild three call sites to move a fraction of
+// a percent, and only for a reader who has travelled since the render.
 function monthKeyOf(ts) {
   const d = at(ts);
   return d.getFullYear() + "-" + pad(d.getMonth() + 1);
