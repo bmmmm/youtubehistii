@@ -1,14 +1,3 @@
-# CI template — Go. Copy to .github/workflows/ci.yml and adjust:
-#   - if the module lives in a subdir, add
-#     `defaults: { run: { working-directory: <dir> } }` under the job.
-#   - add `go build ./...` variants or a matrix only when the project needs
-#     them — this baseline covers fmt, vet, tests, and a build.
-# `go-version: 'stable'` tracks the latest release; pin (e.g. '1.26') only
-# when the repo must stay on an older toolchain. Public repos get free
-# GitHub-hosted runners — keep `-latest`. Action majors verified 2026-08
-# (checkout v7, setup-go v7); when adding actions, query
-# `gh api repos/<owner>/<action>/releases/latest` instead of pinning from
-# memory. Based on the green wallii CI (2026-08).
 name: ci
 
 on:
@@ -24,32 +13,23 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # scripts/check.sh stamps the binary with `git describe --tags`. A
+          # shallow checkout has no tags, so the version would silently be
+          # "dev" in the only place it is built the same way a release is.
+          fetch-depth: 0
       - uses: actions/setup-go@v7
         with:
+          # 'stable' tracks the latest release; pin (e.g. '1.26') only when the
+          # repo must stay on an older toolchain.
           go-version: 'stable'
-      - name: gofmt
-        run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      # Pinned, not @latest: a linter that updates itself decides on its own
-      # day when the build goes red. It gates only because it read 0 findings
-      # on the whole tree first (the one real hit, SA4000, is fixed).
-      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.1 ./...
-      - run: go test ./...
-      - run: go build .
-      # The Go tests build the page as a STRING and never execute a line of
-      # its JavaScript. pagecheck does, and it caught a syntax error that
-      # kills the page before its first line. It could only ever run by hand,
-      # because the real page is somebody's watch history and gitignored — so
-      # CI renders an invented one instead. Both are the same 77 checks.
-      #
-      # The fixture is sized past 300 chains and 300 days on purpose: the
-      # virtual list once capped its rows there, and a smaller fixture passes
-      # whether the cap is back or not (measured — putting the cap back left
-      # a 45-chain fixture green and turned the 620-chain one red).
       - uses: actions/setup-node@v7
         with:
+          # pagecheck runs the page's own JavaScript; the last gate in the
+          # script needs a node on PATH or it stops.
           node-version: '24'
-      - name: pagecheck (runs the page's own JavaScript)
-        run: |
-          go run ./tools/pagefixture > page.html
-          node tools/pagecheck/pagecheck.js page.html
+      # One script, not a list of steps: the gates live in scripts/check.sh so
+      # that what CI runs and what a developer runs are the same six commands
+      # in the same order. Adding a gate here without adding it there is how
+      # "it passed locally" starts meaning nothing.
+      - run: scripts/check.sh

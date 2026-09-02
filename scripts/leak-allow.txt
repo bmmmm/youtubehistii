@@ -87,3 +87,21 @@ other
 general
 uncategorized
 unclassified
+
+# Re-measured 2026-09-02, after the taxonomy grew from 188 to 1990 patterns.
+# Each of the ten below collided with this repo's own TRACKED — that is,
+# already public — content: the GPL text in LICENSE, .github/dependabot.yml,
+# YouTube's own category vocabulary, the invented channels in testdata/, the
+# page renderer and the build scripts. A word that reaches forty source files
+# and a licence says nothing about the person watching; blocking it only
+# taught --no-verify, and it blocked the v0.3.0 tag push outright.
+fonts
+github-actions
+html
+manufacturing
+maps
+movies
+programming
+svg
+tools
+youtube
