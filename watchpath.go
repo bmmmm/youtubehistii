@@ -6,8 +6,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
@@ -133,8 +136,74 @@ func writeWatchPath(p paths, rulesPath string, o pageOpts) error {
 			d.Date, ps.BusiestDayViews)
 	}
 	fmt.Printf("wrote %s (%.1f MB)\n", htmlPath, float64(len(html))/(1<<20))
+	if note := pageSizeNote(len(html), ps.Views); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
 	if line := folded.line(provenance); line != "" {
 		fmt.Println(line)
 	}
+	runPageCheck(os.Stderr, htmlPath)
 	return nil
+}
+
+// pageSizeWarnMB is a fixed ceiling, not a budget that grows with the corpus.
+// Measured: 35,144 views render to 4.1 MB, so 4.3 leaves room for the corpus
+// to grow without crying wolf. A per-view budget was considered and dropped —
+// it would rise along with any regression that made each row more expensive,
+// which is exactly the change worth catching. A page that stops opening on a
+// phone is a page nobody reads.
+const pageSizeWarnMB = 4.3
+
+// pageSizeNote reports bytes per view alongside the total, because the total
+// alone cannot say whether the page grew because the history did or because
+// the payload got fatter.
+func pageSizeNote(bytes, views int) string {
+	mb := float64(bytes) / (1 << 20)
+	if mb <= pageSizeWarnMB {
+		return ""
+	}
+	perView := 0
+	if views > 0 {
+		perView = bytes / views
+	}
+	return fmt.Sprintf("note: the page is %.1f MB, past the %.1f MB mark (%d bytes per view over %d views) — check what grew before it stops opening on a phone",
+		mb, pageSizeWarnMB, perView, views)
+}
+
+// runPageCheck runs the page's own JavaScript over the page that was just
+// written. The Go tests build this page as a STRING and never execute a line
+// of it; pagecheck does, and it caught a syntax error that would have killed
+// the page before its first. CI runs it against an invented fixture — this
+// runs it against the real thing, which is the only copy that has the real
+// data's shapes in it.
+//
+// Never fatal, and never noisy: no script (the binary was installed away from
+// its repo) is silence, no node is one line naming the command, and a failing
+// check is a warning. The gate is CI; this is a heads-up on the file you are
+// about to open.
+func runPageCheck(w io.Writer, htmlPath string) {
+	const script = "tools/pagecheck/pagecheck.js"
+	if _, err := os.Stat(script); err != nil {
+		return
+	}
+	node, err := exec.LookPath("node")
+	if err != nil {
+		fmt.Fprintf(w, "note: node not found, so the page's own JavaScript was not run — node %s %s\n", script, htmlPath)
+		return
+	}
+	out, err := exec.Command(node, script, htmlPath).CombinedOutput()
+	if err != nil {
+		fmt.Fprintf(w, "warning: the page did not pass its own checks (%v):\n%s\n", err, out)
+		return
+	}
+	fmt.Fprint(w, lastLine(out))
+}
+
+// lastLine returns pagecheck's verdict line and drops its per-check chatter.
+func lastLine(b []byte) string {
+	lines := strings.Split(strings.TrimRight(string(b), "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[len(lines)-1] + "\n"
 }

@@ -171,3 +171,62 @@ func TestHolePromptIsAStableCacheKey(t *testing.T) {
 		t.Errorf("the prompt misses its fields:\n%s", user)
 	}
 }
+
+// TestPageSizeNote pins the ceiling to a measurement, not a feeling. 35,144
+// views render to 4.1 MB today; 4.3 leaves the corpus room to grow and still
+// fires on a payload that got fatter per row. A budget that scaled with the
+// view count was the obvious alternative and is the wrong one — it rises
+// along with any regression that makes each row cost more, which is the
+// change this exists to catch.
+func TestPageSizeNote(t *testing.T) {
+	const mb = 1 << 20
+	bytesOf := func(megabytes float64) int { return int(megabytes * mb) }
+	if note := pageSizeNote(bytesOf(4.1), 35144); note != "" {
+		t.Errorf("today's page already warns: %s", note)
+	}
+	if note := pageSizeNote(bytesOf(pageSizeWarnMB), 35144); note != "" {
+		t.Errorf("the page exactly at the mark warns: %s", note)
+	}
+	note := pageSizeNote(bytesOf(5), 35144)
+	if note == "" {
+		t.Fatal("a 5.0 MB page said nothing")
+	}
+	// Bytes per view, because the total alone cannot say whether the page
+	// grew because the history did or because each row got more expensive.
+	for _, want := range []string{"5.0 MB", "4.3 MB", "bytes per view", "35144 views"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("the note misses %q: %s", want, note)
+		}
+	}
+	// No views, no division by zero.
+	if note := pageSizeNote(bytesOf(5), 0); !strings.Contains(note, "0 bytes per view") {
+		t.Errorf("a page with no views: %s", note)
+	}
+}
+
+// TestWatchPathIsQuietWithoutTheCheckTools: the check runs against the page a
+// real run just wrote, so it has to be inert wherever the repo is not — a
+// binary installed away from its source tree must not print a warning about a
+// script it was never going to find. The script test comes FIRST, before
+// exec.LookPath, so this test never starts a node process either.
+func TestWatchPathIsQuietWithoutTheCheckTools(t *testing.T) {
+	t.Chdir(t.TempDir()) // no tools/pagecheck/pagecheck.js in here
+	var out strings.Builder
+	runPageCheck(&out, "somewhere/watchpath.html")
+	if out.String() != "" {
+		t.Errorf("without the script, the check still spoke: %q", out.String())
+	}
+}
+
+// TestLastLineKeepsTheVerdict: pagecheck prints a line per check and one
+// verdict. The per-check chatter belongs in CI, the verdict belongs on the
+// terminal of the person who just rendered the page.
+func TestLastLineKeepsTheVerdict(t *testing.T) {
+	got := lastLine([]byte("check one ok\ncheck two ok\nALL PASS: 77 checks passed, 0 failed\n"))
+	if got != "ALL PASS: 77 checks passed, 0 failed\n" {
+		t.Errorf("lastLine = %q", got)
+	}
+	if got := lastLine(nil); got != "\n" {
+		t.Errorf("lastLine(nil) = %q", got)
+	}
+}
