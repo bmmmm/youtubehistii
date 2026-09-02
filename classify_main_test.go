@@ -601,8 +601,8 @@ func TestModelDriftWarnsOnlyWhenTheJudgeChanged(t *testing.T) {
 		"d": {},
 	}
 	drift := modelDrift(cached, "new-judge")
-	if len(drift) != 1 || drift["old-judge"] != 2 {
-		t.Fatalf("modelDrift = %v, want one entry old-judge:2", drift)
+	if len(drift) != 1 || len(drift["old-judge"]) != 2 {
+		t.Fatalf("modelDrift = %v, want one entry old-judge with 2 ids", drift)
 	}
 	line := modelDriftLine(drift, "new-judge")
 	for _, want := range []string{"old-judge 2", "new-judge", `abtest -model new-judge`} {
@@ -624,6 +624,53 @@ func TestModelDriftWarnsOnlyWhenTheJudgeChanged(t *testing.T) {
 	}
 	if got := modelDriftLine(same, "one"); got != "" {
 		t.Errorf("an unchanged model still warned: %q", got)
+	}
+}
+
+// TestModelDriftNamesTheStraysWhenThereAreFew: a count says a foreign judge
+// is in the corpus, an ID says which cache file to delete. Naming them is only
+// an instruction while the list is short — past driftNameLimit it is a wall,
+// so the line falls back to the count alone.
+func TestModelDriftNamesTheStraysWhenThereAreFew(t *testing.T) {
+	verdicts := func(model string, ids ...string) map[string]classify.LLMVerdict {
+		out := map[string]classify.LLMVerdict{"kept": {Model: "new-judge"}}
+		for _, id := range ids {
+			out[id] = classify.LLMVerdict{Model: model}
+		}
+		return out
+	}
+
+	few := []string{"vidC", "vidA", "vidB"}
+	line := modelDriftLine(modelDrift(verdicts("old-judge", few...), "new-judge"), "new-judge")
+	for _, id := range few {
+		if !strings.Contains(line, id) {
+			t.Errorf("three strays and %q is not named: %s", id, line)
+		}
+	}
+	// Sorted, because the line ends up in a terminal people compare between
+	// runs and a map would reorder it for free.
+	if !strings.Contains(line, "old-judge: vidA vidB vidC") {
+		t.Errorf("the ids are not named in a stable order: %s", line)
+	}
+
+	many := make([]string, 0, driftNameLimit+1)
+	for i := 0; i <= driftNameLimit; i++ {
+		many = append(many, fmt.Sprintf("vid%02d", i))
+	}
+	wall := modelDriftLine(modelDrift(verdicts("old-judge", many...), "new-judge"), "new-judge")
+	if !strings.Contains(wall, fmt.Sprintf("old-judge %d", len(many))) {
+		t.Errorf("the count is gone above the limit: %s", wall)
+	}
+	for _, id := range many {
+		if strings.Contains(wall, id) {
+			t.Fatalf("%d strays and the line still names %q: %s", len(many), id, wall)
+		}
+	}
+
+	// No drift, no line — naming nothing must not turn an empty warning into
+	// a pair of brackets.
+	if got := modelDriftLine(modelDrift(verdicts("new-judge"), "new-judge"), "new-judge"); got != "" {
+		t.Errorf("an unchanged model produced a line: %q", got)
 	}
 }
 

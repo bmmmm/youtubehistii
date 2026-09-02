@@ -182,26 +182,54 @@ func (s passStats) nextLine() string {
 // Verdicts with no model recorded are skipped: they predate the field, and
 // counting them would put a permanent number under a warning about a change
 // nobody made.
-func modelDrift(cached map[string]classify.LLMVerdict, want string) map[string]int {
-	out := map[string]int{}
-	for _, v := range cached {
+func modelDrift(cached map[string]classify.LLMVerdict, want string) map[string][]string {
+	out := map[string][]string{}
+	for id, v := range cached {
 		if v.Model == "" || v.Model == want {
 			continue
 		}
-		out[v.Model]++
+		out[v.Model] = append(out[v.Model], id)
+	}
+	for _, ids := range out {
+		// Map order is random and this line ends up in a terminal people
+		// compare between runs.
+		sort.Strings(ids)
 	}
 	return out
 }
 
+// driftNameLimit is where naming the strays stops helping. Below it the ID is
+// the whole point — it says which cache file to delete, which a count cannot.
+// Above it the list is a wall of IDs nobody acts on and the count is the
+// useful half.
+const driftNameLimit = 10
+
 // modelDriftLine names the way out that does not cost five hours. Not
 // "-retry all": that re-asks defects, and these verdicts have none — they are
 // answers from a different judge, which is a different thing entirely.
-func modelDriftLine(drift map[string]int, want string) string {
+//
+// IDs, never titles: the rest of this output is aggregate-free, and a title is
+// not an aggregate.
+func modelDriftLine(drift map[string][]string, want string) string {
 	if len(drift) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("model changed (%s → %s): those verdicts keep the old judge and nothing is re-asked — \"abtest -model %s\" measures the difference without touching the cache",
-		formatCounts(drift), want, want)
+	byModel := make(map[string]int, len(drift))
+	total := 0
+	for model, ids := range drift {
+		byModel[model] = len(ids)
+		total += len(ids)
+	}
+	line := fmt.Sprintf("model changed (%s → %s): those verdicts keep the old judge and nothing is re-asked — \"abtest -model %s\" measures the difference without touching the cache",
+		formatCounts(byModel), want, want)
+	if total > driftNameLimit {
+		return line
+	}
+	named := make([]string, 0, len(drift))
+	for _, model := range counts.Keys(byModel) {
+		named = append(named, model+": "+strings.Join(drift[model], " "))
+	}
+	return line + " (" + strings.Join(named, " · ") + ")"
 }
 
 // classifyPass runs one full classification over views: rules first, then the
