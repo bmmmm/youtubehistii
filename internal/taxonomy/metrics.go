@@ -6,6 +6,35 @@ import "sort"
 
 // Metrics are the four numbers every refinement round is judged by, plus the
 // counts that make them readable. A round that moves none of them is done.
+//
+// What is NOT here, and why: a measure for the subject that is complete and
+// wrong. Every retry selector picks by DEFECT — no sub, no mode, an unclear
+// topic — and a subject that has an area, a sub and a mode is finished for
+// all of them even when the sub is a channel name that has since grown over
+// unrelated channels. "Wrong" is not a missing field.
+//
+// The obvious candidate was distinct channels per subject, weighted against
+// size. Calibrated on the real corpus (3,274 subjects) before any of it was
+// built, it does not separate:
+//
+//   - channels/videos puts the one documented case that still exists at 1.00,
+//     which is the MEDIAN of every subject. Exactly no signal.
+//   - the raw channel count puts it at rank 97 of 3,274 — top 3 %, but the 96
+//     above it run to 861 channels, and 55 subjects that provably are not
+//     named after any of their channels carry a median of 22 each. Legitimate
+//     breadth and the defect sit on the same axis.
+//   - the structural variant (the sub IS one of its own channels AND it has
+//     spread) selects a small, actionable set — 4 subjects, 391 views, at 5+
+//     channels — and MISSES the surviving documented case, which is not named
+//     after a channel at all. Validated against zero positives.
+//
+// The second documented case is no longer in the corpus; re-classification
+// dissolved it. So the measure was designed for a case that is gone and fails
+// on the one that is left. Recorded, not carried forward as a task: a detector
+// nobody can calibrate is a hypothesis with a threshold on it.
+//
+// ChanMean and ChanMax below are the OPPOSITE direction — subjects per
+// channel, not channels per subject. They do not answer this and were checked.
 type Metrics struct {
 	Subjects  int
 	Tops      int
