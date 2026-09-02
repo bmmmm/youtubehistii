@@ -15,6 +15,8 @@ server on `127.0.0.1`) as fallback. Every verdict records *why* it was made.
 
 ```
 youtubehistii import   data/watch-history.json    → data/history.jsonl
+                       (refuses an export that reaches back less far than the file
+                       it replaces; -force accepts it anyway)
 youtubehistii enrich                              → data/cache/meta/<videoID>.json
 youtubehistii classify                            → data/classified.jsonl
 youtubehistii taxonomy                            → config/taxonomy.yaml (optional)

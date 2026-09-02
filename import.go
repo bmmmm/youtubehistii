@@ -158,7 +158,9 @@ func compareWithExisting(p paths, fresh historySummary, force bool) (string, err
 	if fresh.views == prev.views && fresh.unique == prev.unique {
 		return "since last: unchanged", nil
 	}
-	return fmt.Sprintf("since last: %+d views, %+d new videos (was %s)",
+	// "+3 unique videos", not "+3 new videos": under -force the numbers go
+	// negative, and "-25289 new videos" is not a sentence.
+	return fmt.Sprintf("since last: %+d views, %+d unique videos (was %s)",
 		fresh.views-prev.views, fresh.unique-prev.unique, prev.span()), nil
 }
 

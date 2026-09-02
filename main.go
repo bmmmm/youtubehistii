@@ -45,7 +45,11 @@ const usageText = `youtubehistii — analyze your YouTube watch history locally
 Usage:
   youtubehistii import [path]     parse Takeout JSON -> data/history.jsonl
                                   (default path: data/watch-history.json;
-                                  also picks up data/subscriptions.csv, or -subs <csv>)
+                                  also picks up data/subscriptions.csv, or -subs <csv>.
+                                  Refuses an export that reaches back less far than
+                                  the file it would replace — YouTube deletes history
+                                  by itself after 3, 18 or 36 months; -force accepts
+                                  the shorter one anyway)
   youtubehistii enrich            fetch video metadata via yt-dlp -> data/cache/meta/
                                   (flags: -limit N, -workers 3, -sleep 0.25, -chunk 100,
                                   -cookies-from-browser <browser> for age-gated videos,

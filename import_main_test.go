@@ -143,7 +143,7 @@ func TestImportPrintsTheDelta(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cmdImport: %v\n%s", err, out)
 	}
-	want := "since last: +4 views, +3 new videos (was 2026-07-01 .. 2026-07-03)"
+	want := "since last: +4 views, +3 unique videos (was 2026-07-01 .. 2026-07-03)"
 	if !strings.Contains(out, want) {
 		t.Errorf("import printed no delta line\nwant: %s\ngot:\n%s", want, out)
 	}
