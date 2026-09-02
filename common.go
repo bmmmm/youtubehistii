@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"time"
@@ -227,6 +228,31 @@ func foldThroughTaxonomy(p paths, file string, rows []classify.Verdict) (foldSta
 		rows[i].Topic = m.folded
 	}
 	return st, nil
+}
+
+// installInterrupt turns the first Ctrl-C into a soft stop: the returned
+// channel closes, the caller drains its in-flight work, and a second Ctrl-C
+// kills as usual. cmd names the command to rerun, because the message a person
+// reads while cancelling is the one they act on.
+//
+// "run" had this and "enrich" did not, so interrupting the command that
+// actually does the fetching killed it mid-chunk — the shape that leaves a
+// half-written cache file behind.
+func installInterrupt(cmd string) chan struct{} {
+	stop := make(chan struct{})
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt)
+	go watchInterrupt(os.Stderr, sig, stop, cmd)
+	return stop
+}
+
+// watchInterrupt is the testable half: no signal package, just a channel that
+// fires. Split out because a test that raises SIGINT at itself is a test that
+// can kill the whole test binary.
+func watchInterrupt(w io.Writer, sig <-chan os.Signal, stop chan struct{}, cmd string) {
+	<-sig
+	fmt.Fprintf(w, "\ninterrupt — finishing in-flight chunks (Ctrl-C again to kill); rerun %q to resume\n", cmd)
+	close(stop)
 }
 
 // readJSONL reads one JSON document per line.

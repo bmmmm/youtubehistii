@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -319,5 +320,126 @@ func TestMatchesGoneReason(t *testing.T) {
 		if got := matchesGoneReason(c.spec, c.reason); got != c.want {
 			t.Errorf("matchesGoneReason(%q, %q) = %v, want %v", c.spec, c.reason, got, c.want)
 		}
+	}
+}
+
+// TestFailedRetryNamesTheFlagItNeeds: -retry-gone reopens tombstoned ids for
+// one run. When such an id fails transiently, the closing line used to say
+// "rerun enrich to retry just those" — and it is wrong for exactly these,
+// because the tombstone is still there and a plain rerun's freshness check
+// filters them straight back out. The advice was a paid no-op.
+//
+// The tombstone stays. Deleting it would make a one-off reconsideration
+// permanent, and it is the only destructive operation in the whole cache —
+// so the assertion checks that the file is untouched as well.
+func TestFailedRetryNamesTheFlagItNeeds(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	cache := enrich.Cache{Dir: p.metaCacheDir()}
+	views := viewsN(2)
+	for _, v := range views {
+		// An empty reason is what the "unknown" selector matches: a
+		// tombstone written before the reason was recorded at all.
+		if err := cache.Write(enrich.Meta{ID: v.VideoID, Unavailable: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := cache.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := enrichOpts{
+		chunk: 1, workers: 1, pauseUnit: time.Millisecond, retryGone: "unknown",
+		fetch: func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
+			return enrich.ChunkResult{Failed: ids}, nil
+		},
+	}
+	out, err := captureStdout(t, func() error { return runEnrichAll(t, p, views, opts) })
+	if err != nil {
+		t.Fatalf("enrichAll: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, `enrich -retry-gone unknown`) {
+		t.Errorf("the closing line does not name the flag the rerun needs:\n%s", out)
+	}
+
+	after, err := cache.ReadAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("cache holds %d entries, had %d — a failed retry deleted a tombstone", len(after), len(before))
+	}
+	for id, m := range before {
+		if got := after[id]; got.Unavailable != m.Unavailable || got.GoneReason != m.GoneReason {
+			t.Errorf("%s: tombstone changed from %+v to %+v", id, m, got)
+		}
+	}
+}
+
+// TestBackoffIgnoresAnAlreadyCachedChunk: a chunk another enrich cached in the
+// meantime asks YouTube nothing. Letting it run the adapt block let an idle
+// chunk talk the backoff down while the run was still being throttled — the
+// run then sped back up into the same rate limit it had just been given.
+func TestBackoffIgnoresAnAlreadyCachedChunk(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	cache := enrich.Cache{Dir: p.metaCacheDir()}
+	views := viewsN(3)
+
+	st := newState()
+	st.penalise()
+	if before, _ := st.snapshot(); before != 1 {
+		t.Fatalf("setup: backoff = %d, want 1", before)
+	}
+
+	// Everything lands in the cache between building the missing list and
+	// the worker picking the chunk up. enrichAll builds `missing` from the
+	// cache it sees at start, so pre-caching here would leave it with
+	// nothing to do; the fetcher writes them instead, on the first chunk.
+	opts := enrichOpts{
+		chunk: 1, workers: 1, pauseUnit: time.Millisecond, state: st,
+		fetch: func(ids []string, o enrich.FetchOpts) (enrich.ChunkResult, error) {
+			for _, v := range views {
+				if err := cache.Write(enrich.Meta{ID: v.VideoID, Title: "t"}); err != nil {
+					t.Error(err)
+				}
+			}
+			return enrich.ChunkResult{Failed: ids, RateLimited: true}, nil
+		},
+	}
+	if err := runEnrichAll(t, p, views, opts); err != nil {
+		t.Fatal(err)
+	}
+	// One real chunk, rate limited, so the backoff went 1 -> 2. The two
+	// chunks after it were fully cached and asked nothing: they must leave
+	// it there rather than decaying it back down.
+	if after, _ := st.snapshot(); after != 2 {
+		t.Errorf("backoff = %d, want 2 — a chunk that asked YouTube nothing changed the backoff", after)
+	}
+}
+
+// TestWatchInterruptClosesStopAndNamesTheCommand: the message a person reads
+// while cancelling is the one they act on, so it has to name the command to
+// rerun. Driven through the channel rather than a real SIGINT — a test that
+// raises a signal at itself can kill the whole test binary.
+func TestWatchInterruptClosesStopAndNamesTheCommand(t *testing.T) {
+	sig := make(chan os.Signal, 1)
+	stop := make(chan struct{})
+	var out strings.Builder
+	done := make(chan struct{})
+	go func() { watchInterrupt(&out, sig, stop, "enrich"); close(done) }()
+
+	sig <- os.Interrupt
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchInterrupt did not return after a signal")
+	}
+	select {
+	case <-stop:
+	default:
+		t.Error("the stop channel is still open after an interrupt")
+	}
+	if !strings.Contains(out.String(), `rerun "enrich" to resume`) {
+		t.Errorf("the message does not name the command: %q", out.String())
 	}
 }

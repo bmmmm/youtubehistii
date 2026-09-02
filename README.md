@@ -34,7 +34,8 @@ youtubehistii abtest   would another model on the server classify better? Asks t
 ```
 
 Each stage writes plain, inspectable files and can be re-run independently.
-`enrich` is resumable — interrupt it any time, it skips what is already cached.
+`enrich` is resumable — the first Ctrl-C lets the chunks already in flight
+finish writing (a second one kills), and the rerun skips what is cached.
 It fetches most-watched videos first (so a `-limit` test batch covers the
 largest share of your actual views) and runs a small worker pool
 (`-workers 3 -sleep 0.25` by default). YouTube rate-limits by IP: when it
@@ -57,7 +58,9 @@ done: 2 fetched, 3499 gone for good (tombstoned, kept in the report), 7 failed
 `-retry-gone` reopens tombstones that a credential might lift: `locked`
 (age + members), `unknown` (written before reasons were recorded), `all`, or a
 comma-separated list of reasons. Without it a tombstone is final, which is the
-point of writing one.
+point of writing one. A reopened id that then fails transiently keeps its
+tombstone, so a plain rerun skips it again — the closing line names
+`-retry-gone` with the spec you used rather than telling you to rerun `enrich`.
 
 Enrich fetches anonymously. `-cookies-from-browser auto` (or a browser name,
 with the full `BROWSER[+KEYRING][:PROFILE]` syntax) hands your browser cookies

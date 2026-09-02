@@ -133,7 +133,11 @@ func cmdEnrich(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read history (run \"import\" first): %w", err)
 	}
-	return enrichAll(p, views, ef.opts())
+	opts := ef.opts()
+	// "run" has had this since it was written; the command that does the
+	// actual fetching did not, so a Ctrl-C there killed a worker mid-chunk.
+	opts.stop = installInterrupt("enrich")
+	return enrichAll(p, views, opts)
 }
 
 type fetchFunc func([]string, enrich.FetchOpts) (enrich.ChunkResult, error)
@@ -274,6 +278,15 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 	// chunks off a channel; the first error stops the intake.
 	type totals struct {
 		fetched, tombstoned, failed, done int
+		// failedRetry counts the failures among the ids -retry-gone
+		// reopened. They are the reason the closing line cannot just say
+		// "rerun enrich": those ids still hold a tombstone, so a plain rerun
+		// skips them and the retry has to be asked for again by name.
+		//
+		// Deleting the tombstone instead was considered and rejected. It
+		// would turn a one-off reconsideration into a permanent one, and it
+		// is the only destructive operation anywhere in the cache.
+		failedRetry int
 		// goneBy counts tombstones per reason. Without it the reason exists
 		// only inside the cache, and the run that produced it says nothing
 		// about what it found — which is the whole question when deciding
@@ -359,6 +372,11 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 					t.goneBy[g.Reason]++
 				}
 				t.failed += len(res.Failed)
+				for _, id := range res.Failed {
+					if retrying[id] {
+						t.failedRetry++
+					}
+				}
 				t.done += len(all)
 				elapsed := time.Since(start)
 				eta := time.Duration(float64(elapsed) / float64(t.done) * float64(len(missing)-t.done)).Round(time.Second)
@@ -369,17 +387,24 @@ func enrichAll(p paths, views []takeout.View, opts enrichOpts) error {
 				// Adapt to YouTube's pushback outside the lock: a throttled
 				// run must look throttled, not hung, so the pause is named
 				// in the progress line before it is taken.
+				//
+				// Only when something was actually asked. A chunk another
+				// enrich had already cached asked YouTube nothing, and
+				// letting it call recover() let an idle chunk talk the
+				// backoff down while the run was still being rate limited.
 				var pause time.Duration
-				if res.RateLimited {
-					var level int
-					pause, level = st.penalise()
-					line += fmt.Sprintf(" — rate limited, backoff x%d, pausing %s", 1<<level, pause)
-				} else {
-					// Anything that came back without pushback counts as
-					// clean, including an all-tombstone chunk: it fetched
-					// nothing but YouTube answered every ID, so there is no
-					// reason to keep the run throttled.
-					st.recover()
+				if len(ids) > 0 {
+					if res.RateLimited {
+						var level int
+						pause, level = st.penalise()
+						line += fmt.Sprintf(" — rate limited, backoff x%d, pausing %s", 1<<level, pause)
+					} else {
+						// Anything that came back without pushback counts as
+						// clean, including an all-tombstone chunk: it fetched
+						// nothing but YouTube answered every ID, so there is no
+						// reason to keep the run throttled.
+						st.recover()
+					}
 				}
 				fmt.Println(line)
 				if pause > 0 {
@@ -427,6 +452,13 @@ feed:
 	}
 	if t.failed > 0 {
 		fmt.Println("failed = transient (network/rate limit) — rerun \"enrich\" to retry just those")
+		// ...except the reopened tombstones. They are still tombstoned, so a
+		// plain rerun's freshness check filters them straight back out and
+		// the "rerun enrich" advice above would be a paid no-op.
+		if t.failedRetry > 0 {
+			fmt.Printf("  %d of those were reopened by -retry-gone and still carry a tombstone — a plain rerun skips them; rerun \"enrich -retry-gone %s\"\n",
+				t.failedRetry, opts.retryGone)
+		}
 		if t.failed*5 > t.fetched && t.failed > 20 {
 			fmt.Fprintln(os.Stderr, "warning: high failure rate — YouTube may be rate limiting this IP; wait a while, raise -sleep or lower -workers")
 		}

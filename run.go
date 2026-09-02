@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"maps"
 	"os"
-	"os/signal"
 	"time"
 
 	"github.com/bmmmm/youtubehistii/internal/classify"
@@ -57,15 +56,7 @@ func cmdRun(args []string) error {
 	// First Ctrl-C: stop feeding enrich chunks and let in-flight cache writes
 	// finish, so every cache file stays whole and a rerun resumes seamlessly.
 	// A second Ctrl-C kills as usual.
-	stop := make(chan struct{})
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	go func() {
-		<-sig
-		fmt.Fprintln(os.Stderr, "\ninterrupt — finishing in-flight chunks (Ctrl-C again to kill); rerun \"run\" to resume")
-		close(stop)
-		signal.Stop(sig)
-	}()
+	stop := installInterrupt("run")
 
 	eopts := ef.opts()
 	eopts.stop = stop
