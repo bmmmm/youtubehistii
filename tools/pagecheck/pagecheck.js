@@ -95,6 +95,16 @@ const ok = (name, cond, extra) => {
   if (cond) { pass++; return; }
   fail++; console.log("FAIL: " + name + (extra !== undefined ? "  [" + extra + "]" : ""));
 };
+// skip records a group of checks that did not APPLY to this page, so the
+// closing count stops moving in silence: the fixture and a real page report
+// different totals, and nothing used to say whether the missing checks did
+// not apply or had gone missing. Those two readings need different reactions.
+//
+// A group, not a per-check number: a hand-kept "6 skipped" goes stale the
+// first time somebody adds a check inside the group, and a gate whose own
+// bookkeeping rots is the failure this is here to prevent.
+const skips = [];
+const skip = reason => { skips.push(reason); };
 const D = globalThis.__D;
 const render = h => { ids.view.textContent = ""; win.location.hash = h; };
 const textOf = () => ids.view.textContent;
@@ -368,8 +378,10 @@ if (D.holeLabels) {
     ok("an unlabelled chain still opens", ids.view.querySelectorAll("div.chainpanel").length === 1);
   }
 } else {
-  ok("no labels on the payload is a valid state", true);
+  skip("the model's names: this page carries no hole labels");
 }
 
-console.log((fail ? "FAILED" : "ALL PASS") + ": " + pass + " checks passed, " + fail + " failed");
+let line = (fail ? "FAILED" : "ALL PASS") + ": " + pass + " checks passed, " + fail + " failed";
+if (skips.length) line += ", " + skips.length + " group(s) skipped (" + skips.join("; ") + ")";
+console.log(line);
 process.exit(fail ? 1 : 0);
