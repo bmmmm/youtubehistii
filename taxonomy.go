@@ -3,6 +3,7 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -38,9 +39,20 @@ const (
 // drive cmdTaxonomy end to end is an http.RoundTripper handed in from a test.
 var newOMLXClient = omlx.New
 
+// addTaxonomyFileFlag registers -taxonomy-file on every command that reads or
+// writes the projection. Shared rather than repeated because -rules already
+// showed what happens otherwise: two commands disagreeing about which file
+// they mean (see the note at loadRules in classify.go). controlPath stays a
+// constant — the control file steers a running loop and is read from the
+// working directory by design.
+func addTaxonomyFileFlag(fs *flag.FlagSet) *string {
+	return fs.String("taxonomy-file", taxonomyPath, "the taxonomy to read or write")
+}
+
 func cmdTaxonomy(args []string) error {
 	fs, dataDir := newFlagSet("taxonomy")
 	rulesPath := fs.String("rules", "", "rules file (default: config/rules.yaml, falling back to config/rules.example.yaml)")
+	taxFile := addTaxonomyFileFlag(fs)
 	embedModel := fs.String("embed-model", "bge-m3-mlx-fp16", "embedding model on the oMLX server (multilingual, so chess and schach meet)")
 	// Thresholds live on the CENTERED distance scale (see -center), where the
 	// structure degrades gently instead of collapsing: calibrated on a 35k
@@ -196,7 +208,7 @@ func cmdTaxonomy(args []string) error {
 		last = m
 	}
 
-	if err := taxonomy.WriteFile(taxonomyPath, subjects, []string{
+	if err := taxonomy.WriteFile(*taxFile, subjects, []string{
 		fmt.Sprintf("generated: %s", time.Now().Format(time.RFC3339)),
 		metricsLine(last),
 		fmt.Sprintf("baseline: %s", metricsLine(baseline)),
@@ -204,10 +216,10 @@ func cmdTaxonomy(args []string) error {
 		return err
 	}
 	timer.mark("write")
-	log.event("write", map[string]any{"path": taxonomyPath, "subjects": len(subjects), "tops": last.Tops})
+	log.event("write", map[string]any{"path": *taxFile, "subjects": len(subjects), "tops": last.Tops})
 	log.event("naming", nameStats.Detail())
 	log.event("timing", timer.spans)
-	fmt.Printf("wrote %s (%d subjects under %d top levels)\n", taxonomyPath, len(subjects), last.Tops)
+	fmt.Printf("wrote %s (%d subjects under %d top levels)\n", *taxFile, len(subjects), last.Tops)
 	fmt.Printf("naming     %s\n", nameStats.Line())
 	fmt.Printf("timing     %s\n", timer.line())
 	fmt.Println("compare with: youtubehistii report -taxonomy / watchpath -taxonomy")

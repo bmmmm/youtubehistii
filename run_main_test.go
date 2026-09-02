@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bmmmm/youtubehistii/internal/classify"
 	"github.com/bmmmm/youtubehistii/internal/enrich"
 	"github.com/bmmmm/youtubehistii/internal/takeout"
 )
@@ -168,5 +169,159 @@ func TestCmdRunEndsOnTheWhatNowLine(t *testing.T) {
 		if strings.Contains(out, unwanted) {
 			t.Errorf("a run with no model verdicts offered %q:\n%s", unwanted, out)
 		}
+	}
+}
+
+// writeTaxonomyFile writes a projection next to the fixture. The map is
+// deliberately partial: one topic it knows, and the fixture's own topics it
+// does not, so the "unknown" count has something to count.
+func writeTaxonomyFile(t *testing.T, path string, m map[string]string) {
+	t.Helper()
+	var b strings.Builder
+	b.WriteString("map:\n")
+	for k, v := range m {
+		fmt.Fprintf(&b, "  %q: %q\n", k, v)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFoldWarnsWhenTheTaxonomyIsOlderThanTheVerdicts: a projection older than
+// the verdicts it projects describes a corpus that has moved on. Nothing
+// fails — the newer topics pass through — and that is the problem: a report
+// that silently under-describes looks exactly like one that does not.
+func TestFoldWarnsWhenTheTaxonomyIsOlderThanTheVerdicts(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	taxFile := filepath.Join(t.TempDir(), "taxonomy.yaml")
+	writeTaxonomyFile(t, taxFile, map[string]string{"music/jazz": "sound/jazz"})
+	if err := writeJSONL(p.classifiedJSONL(), []classify.Verdict{
+		{VideoID: "a", Topic: "music/jazz"},
+		{VideoID: "b", Topic: "science/rockets"},
+		{VideoID: "c", Topic: "science/rockets"},
+		{VideoID: "d", Topic: "unclear"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(taxFile, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	var warn strings.Builder
+	warnIfTaxonomyIsBehind(&warn, p, taxFile)
+	if !strings.Contains(warn.String(), taxFile) || !strings.Contains(warn.String(), p.classifiedJSONL()) {
+		t.Errorf("the warning names neither file: %q", warn.String())
+	}
+
+	// The other direction: a taxonomy built after the verdicts is current,
+	// and a warning there would be noise that teaches people to skip it.
+	newer := time.Now().Add(2 * time.Hour)
+	if err := os.Chtimes(taxFile, newer, newer); err != nil {
+		t.Fatal(err)
+	}
+	warn.Reset()
+	warnIfTaxonomyIsBehind(&warn, p, taxFile)
+	if warn.String() != "" {
+		t.Errorf("a current taxonomy still warned: %q", warn.String())
+	}
+
+	// And the counts: two distinct topics, one known, one not — per topic,
+	// over three views, with "unclear" in neither bucket because it is the
+	// classifier declining to answer, not a gap in the taxonomy.
+	rows, err := readJSONL[classify.Verdict](p.classifiedJSONL())
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := foldThroughTaxonomy(p, taxFile, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.folded != 1 || st.unknown != 1 || st.unknownViews != 2 {
+		t.Errorf("foldStats = %+v, want 1 folded, 1 unknown over 2 views", st)
+	}
+
+	// The load-bearing half of the split: a topic whose AREA the map knows
+	// but whose subject it does not still folds, and still counts as unknown.
+	// Counting it as described would report a taxonomy that covers everything
+	// while the page and the CSV show different subjects — the divergence
+	// this line exists to surface.
+	areaOnly := filepath.Join(t.TempDir(), "area.yaml")
+	writeTaxonomyFile(t, areaOnly, map[string]string{"music": "sound"})
+	partial := []classify.Verdict{{VideoID: "a", Topic: "music/jazz"}}
+	st2, err := foldThroughTaxonomy(p, areaOnly, partial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if partial[0].Topic != "sound/jazz" {
+		t.Errorf("topic = %q, want sound/jazz — the area still folds", partial[0].Topic)
+	}
+	if st2.folded != 0 || st2.unknown != 1 {
+		t.Errorf("foldStats = %+v, want 0 folded, 1 unknown — the subject is newer than the map", st2)
+	}
+	if line := st.line("sha256:deadbeefcafe x.yaml t"); !strings.Contains(line, "1 unknown (2 views)") {
+		t.Errorf("the line does not carry the counts: %s", line)
+	}
+	if line := (foldStats{}).line("sha256:deadbeefcafe x.yaml t"); line != "" {
+		t.Errorf("a fold over no rows still printed a line: %q", line)
+	}
+}
+
+// TestTaxonomyFileFlagLeavesTheConstantBehind: -taxonomy-file exists so a
+// second taxonomy can be compared against the first without moving files
+// around. The test runs in a directory with NO config/taxonomy.yaml, so a
+// path that still resolved to the constant would fail outright.
+func TestTaxonomyFileFlagLeavesTheConstantBehind(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+
+	taxFile := filepath.Join(dataDir, "elsewhere.yaml")
+	writeTaxonomyFile(t, taxFile, map[string]string{"music": "sound"})
+
+	if _, err := os.Stat(taxonomyPath); err == nil {
+		t.Fatalf("the test directory has a %s after all — the assertion below proves nothing", taxonomyPath)
+	}
+	out, err := captureStdout(t, func() error {
+		return cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"),
+			"-no-llm", "-taxonomy", "-taxonomy-file", taxFile})
+	})
+	if err != nil {
+		t.Fatalf("cmdRun with -taxonomy-file: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, taxFile) {
+		t.Errorf("the run never named the taxonomy it used:\n%s", out)
+	}
+}
+
+// TestRunDoesNotTellYouToRunTheThingItJustRan: "report" ends by advising a
+// watchpath run, which is right when a person typed "report" and wrong when
+// run is about to render the page two lines later. Same for the taxonomy
+// line — printed by both stages it would say the same thing twice.
+func TestRunDoesNotTellYouToRunTheThingItJustRan(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+	taxFile := filepath.Join(dataDir, "taxonomy.yaml")
+	writeTaxonomyFile(t, taxFile, map[string]string{"music": "sound"})
+
+	out, err := captureStdout(t, func() error {
+		return cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"),
+			"-no-llm", "-taxonomy", "-taxonomy-file", taxFile})
+	})
+	if err != nil {
+		t.Fatalf("cmdRun: %v\n%s", err, out)
+	}
+	if strings.Contains(out, `run "watchpath"`) {
+		t.Errorf("a full run told the reader to run watchpath, which it just did:\n%s", out)
+	}
+	if n := strings.Count(out, "taxonomy: sha256:"); n != 1 {
+		t.Errorf("the run printed %d taxonomy provenance lines, want exactly 1:\n%s", n, out)
 	}
 }

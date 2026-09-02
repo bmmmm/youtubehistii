@@ -141,23 +141,42 @@ type Taxonomy struct {
 	Map map[string]string `yaml:"map"`
 }
 
+// FoldKind names which of Fold's three branches a topic took. The folded
+// string cannot be read for this: a passthrough and an exact hit look
+// identical whenever the projection happens to be the identity, so a caller
+// asking "how much of this corpus does the taxonomy still describe" would
+// have to guess.
+type FoldKind int
+
+const (
+	FoldExact       FoldKind = iota // the projection knew this exact area/sub
+	FoldArea                        // only the area was known; the sub came along unchanged
+	FoldPassthrough                 // neither — classified after the taxonomy was built
+)
+
 // Fold projects one canonical verdict topic into the new taxonomy. A topic
 // the projection has never seen (classified after the taxonomy was built)
 // keeps its sub and only has its area folded — and if even the area is
 // unknown, the topic passes through unchanged, "unclear" included.
 func (t Taxonomy) Fold(topic string) string {
+	folded, _ := t.FoldWithKind(topic)
+	return folded
+}
+
+// FoldWithKind is Fold plus the branch it took.
+func (t Taxonomy) FoldWithKind(topic string) (string, FoldKind) {
 	if n, ok := t.Map[topic]; ok {
-		return n
+		return n, FoldExact
 	}
 	area, sub := rules.SplitTopic(topic)
 	if n, ok := t.Map[area]; ok {
 		top, _ := rules.SplitTopic(n)
 		if sub == "" {
-			return n
+			return n, FoldExact
 		}
-		return top + "/" + sub
+		return top + "/" + sub, FoldArea
 	}
-	return topic
+	return topic, FoldPassthrough
 }
 
 // Build renders subject clusters into the projection map. A subject named

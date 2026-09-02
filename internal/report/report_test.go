@@ -110,22 +110,42 @@ func TestWriteCSV(t *testing.T) {
 	rows, subs := sampleData()
 	st := Aggregate(rows, subs)
 	var buf bytes.Buffer
-	if err := WriteCSV(&buf, rows, st.SubbedSet); err != nil {
+	if err := WriteCSV(&buf, rows, st.SubbedSet, "sha256:abc123abc123 config/taxonomy.yaml 2026-09-01T01:12:39Z"); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
-	if len(lines) != 5 {
-		t.Fatalf("csv lines = %d, want header+4", len(lines))
+	if len(lines) != 6 {
+		t.Fatalf("csv lines = %d, want provenance+header+4", len(lines))
 	}
-	if !strings.Contains(lines[3], ",true,") {
-		t.Errorf("subscribed view not flagged: %s", lines[3])
+	// First line, and a comment: a CSV whose topics came from a projection
+	// has to say WHICH one, and it has to say it where pandas (comment="#")
+	// and `grep -v '^#'` already skip it.
+	if !strings.HasPrefix(lines[0], "# taxonomy: sha256:abc123abc123 ") {
+		t.Errorf("first line does not carry the taxonomy provenance: %s", lines[0])
+	}
+	if !strings.Contains(lines[4], ",true,") {
+		t.Errorf("subscribed view not flagged: %s", lines[4])
 	}
 	// The full topic and its area both ship, so a pivot can group on either.
-	if !strings.Contains(lines[0], "topic,area,") {
-		t.Errorf("header misses the area column: %s", lines[0])
+	if !strings.Contains(lines[1], "topic,area,") {
+		t.Errorf("header misses the area column: %s", lines[1])
 	}
-	if !strings.Contains(lines[3], "dev/talks,dev,") {
-		t.Errorf("row misses topic+area: %s", lines[3])
+	if !strings.Contains(lines[4], "dev/talks,dev,") {
+		t.Errorf("row misses topic+area: %s", lines[4])
+	}
+}
+
+// A run without -taxonomy still has to say so. "none" is an answer; a missing
+// line would leave the reader guessing whether the topics were projected.
+func TestWriteCSVSaysNoneWhenNothingWasFolded(t *testing.T) {
+	rows, subs := sampleData()
+	st := Aggregate(rows, subs)
+	var buf bytes.Buffer
+	if err := WriteCSV(&buf, rows, st.SubbedSet, ""); err != nil {
+		t.Fatal(err)
+	}
+	if first, _, _ := strings.Cut(buf.String(), "\n"); first != "# taxonomy: none" {
+		t.Errorf("first line = %q, want \"# taxonomy: none\"", first)
 	}
 }
 

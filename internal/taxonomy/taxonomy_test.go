@@ -493,3 +493,38 @@ func allTopics(cs []Cluster) [][]string {
 	}
 	return out
 }
+
+// TestFoldKindNamesItsBranch: the folded string cannot be read for which
+// branch produced it. An exact hit and a passthrough are the same string
+// whenever the projection happens to be the identity, and "how much of this
+// corpus does the taxonomy still describe" is exactly the question a caller
+// asks after a classify run has added topics the taxonomy has never seen.
+func TestFoldKindNamesItsBranch(t *testing.T) {
+	tax := Taxonomy{Map: map[string]string{
+		"music/jazz": "sound/jazz",
+		"gaming":     "play",
+		// The identity case: folded and unfolded read alike, and only the
+		// kind tells them apart.
+		"news/daily": "news/daily",
+	}}
+	for _, c := range []struct {
+		topic string
+		want  string
+		kind  FoldKind
+	}{
+		{"music/jazz", "sound/jazz", FoldExact},
+		{"news/daily", "news/daily", FoldExact},
+		{"gaming/factorio", "play/factorio", FoldArea},
+		{"gaming", "play", FoldExact},
+		{"science/rockets", "science/rockets", FoldPassthrough},
+		{"unclear", "unclear", FoldPassthrough},
+	} {
+		got, kind := tax.FoldWithKind(c.topic)
+		if got != c.want || kind != c.kind {
+			t.Errorf("FoldWithKind(%q) = (%q, %v), want (%q, %v)", c.topic, got, kind, c.want, c.kind)
+		}
+		if plain := tax.Fold(c.topic); plain != got {
+			t.Errorf("Fold(%q) = %q but FoldWithKind said %q", c.topic, plain, got)
+		}
+	}
+}

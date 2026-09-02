@@ -45,7 +45,7 @@ func cmdRun(args []string) error {
 	// the first second. Folding an empty slice loads the file and touches
 	// nothing.
 	if *wf.useTaxonomy {
-		if err := foldThroughTaxonomy(nil); err != nil {
+		if _, err := foldThroughTaxonomy(p, *wf.taxonomyFile, nil); err != nil {
 			return err
 		}
 	}
@@ -203,12 +203,14 @@ loop:
 	}
 	// Both stages read the SAME taxonomy switch: a terminal summary folded
 	// differently from the page it points at would be two answers to one
-	// question.
-	reportArgs := []string{"-data", p.dataDir, "-no-names"}
-	if *wf.useTaxonomy {
-		reportArgs = append(reportArgs, "-taxonomy")
-	}
-	if err := cmdReport(reportArgs); err != nil {
+	// question. Called directly rather than through a []string of flags —
+	// building arguments to parse them back could only lose a value.
+	if err := writeReport(p, reportOpts{
+		noNames:      true,
+		useTaxonomy:  *wf.useTaxonomy,
+		taxonomyFile: *wf.taxonomyFile,
+		chained:      true,
+	}); err != nil {
 		return err
 	}
 	// The page last, so its path is the final line — it is what the run was

@@ -60,6 +60,12 @@ type pathData struct {
 	// Sparse and omitted entirely when no run produced any: the page reads
 	// it as decoration, never as structure.
 	HoleLabels [][]any `json:"holeLabels,omitempty"`
+
+	// Taxonomy identifies the projection the topics were folded through —
+	// the same string the CSV carries in its first line and the terminal
+	// prints. Two artefacts of one run that disagree about their topics used
+	// to have no way to be told apart.
+	Taxonomy string `json:"taxonomy,omitempty"`
 }
 
 // clusterNodes turns the topic tree into [name, views, durationS, children],
@@ -425,11 +431,16 @@ type WatchPathOpts struct {
 	// HoleLabels names chains by index into Path.Chains. Sparse on purpose:
 	// only the ones a run actually paid for.
 	HoleLabels map[int]string
+
+	// Taxonomy is the provenance of the projection the rows were folded
+	// through ("sha256:… <path> <mtime>", or "none").
+	Taxonomy string
 }
 
 // RenderWatchPathOpts is RenderWatchPath plus the optional extras.
 func RenderWatchPathOpts(p *Path, st *Stats, generated time.Time, o WatchPathOpts) ([]byte, error) {
 	data := buildPathData(p, st)
+	data.Taxonomy = o.Taxonomy
 	if len(o.HoleLabels) > 0 {
 		// Sorted by index so two runs of the same data produce the same
 		// bytes — a page that differs only in map order would look like a

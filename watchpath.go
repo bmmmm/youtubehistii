@@ -32,25 +32,28 @@ func cmdWatchPath(args []string) error {
 // watchPathFlags are the page flags shared by "watchpath" and "run". "run"
 // owns -rules already (the LLM stage needs it), so it is not in here.
 type watchPathFlags struct {
-	useTaxonomy *bool
-	labelHoles  *int
+	useTaxonomy  *bool
+	taxonomyFile *string
+	labelHoles   *int
 }
 
 func addWatchPathFlags(fs *flag.FlagSet) watchPathFlags {
 	return watchPathFlags{
-		useTaxonomy: fs.Bool("taxonomy", false, "project topics through "+taxonomyPath+" before building the path"),
-		labelHoles:  fs.Int("label-holes", 0, "ask the chat model for a short name for the N deepest rabbit holes (0 = off; replies are cached, a rerun asks nothing)"),
+		useTaxonomy:  fs.Bool("taxonomy", false, "project topics through the taxonomy before building the path"),
+		taxonomyFile: addTaxonomyFileFlag(fs),
+		labelHoles:   fs.Int("label-holes", 0, "ask the chat model for a short name for the N deepest rabbit holes (0 = off; replies are cached, a rerun asks nothing)"),
 	}
 }
 
 // pageOpts is what writeWatchPath needs, past the paths and the rules file.
 type pageOpts struct {
-	useTaxonomy bool
-	labelHoles  int
+	useTaxonomy  bool
+	taxonomyFile string
+	labelHoles   int
 }
 
 func (wf watchPathFlags) opts() pageOpts {
-	return pageOpts{useTaxonomy: *wf.useTaxonomy, labelHoles: *wf.labelHoles}
+	return pageOpts{useTaxonomy: *wf.useTaxonomy, taxonomyFile: *wf.taxonomyFile, labelHoles: *wf.labelHoles}
 }
 
 // writeWatchPath renders the page and writes it. Split out of cmdWatchPath so
@@ -63,8 +66,11 @@ func writeWatchPath(p paths, rulesPath string, o pageOpts) error {
 	if err != nil {
 		return fmt.Errorf("read classified views (run \"classify\" first): %w", err)
 	}
+	provenance := "none"
+	var folded foldStats
 	if o.useTaxonomy {
-		if err := foldThroughTaxonomy(rows); err != nil {
+		provenance = taxonomyProvenance(o.taxonomyFile)
+		if folded, err = foldThroughTaxonomy(p, o.taxonomyFile, rows); err != nil {
 			return err
 		}
 	}
@@ -86,7 +92,7 @@ func writeWatchPath(p paths, rulesPath string, o pageOpts) error {
 	// and the one part whose absence changes nothing structural: without
 	// them the page names its chains after their depth and area, which is
 	// what it did before they existed.
-	var opts report.WatchPathOpts
+	opts := report.WatchPathOpts{Taxonomy: provenance}
 	if o.labelHoles > 0 {
 		cfg, err := loadRules(rulesPath)
 		if err != nil {
@@ -127,5 +133,8 @@ func writeWatchPath(p paths, rulesPath string, o pageOpts) error {
 			d.Date, ps.BusiestDayViews)
 	}
 	fmt.Printf("wrote %s (%.1f MB)\n", htmlPath, float64(len(html))/(1<<20))
+	if line := folded.line(provenance); line != "" {
+		fmt.Println(line)
+	}
 	return nil
 }

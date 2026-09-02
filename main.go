@@ -73,7 +73,7 @@ Usage:
                                   -llm-limit N, -no-llm, -keep-verdicts, -retry <defect>,
                                   -include-unenriched (applied to the final sweep
                                   only, when enrich has had its whole run),
-                                  -taxonomy, -label-holes N
+                                  -taxonomy, -taxonomy-file <path>, -label-holes N
   youtubehistii inspect           what the metadata cache holds: youtube category
                                   distribution and creator tags, to decide the
                                   taxonomy from the data (flags: -tags,
@@ -86,6 +86,7 @@ Usage:
                                   -taxonomy. Steer a running loop through
                                   config/taxonomy-control.yaml, watch it in
                                   data/out/taxonomy-run.jsonl. Flags: -rules <file>,
+                                  -taxonomy-file <path> (where to write it),
                                   -embed-model bge-m3-mlx-fp16, -fine 0.70, -coarse 0.85,
                                   -min-videos 3, -min-top-videos 25, -max-radius 0.50,
                                   -rounds 10, -tail-n 1, -center=false (skip
@@ -107,15 +108,17 @@ Usage:
   youtubehistii report            render data/out/report.csv + terminal summary; the same
                                   numbers are a view of the watchpath page, at #/report
                                   (flags: -taxonomy to project topics through
-                                  config/taxonomy.yaml, -no-names for a run that names
-                                  no channel)
+                                  config/taxonomy.yaml, -taxonomy-file <path> to point
+                                  at another one, -no-names for a run that names no
+                                  channel)
   youtubehistii watchpath         render data/out/watchpath.html: the same views along the
                                   time axis — sittings split by a 30 min gap, newest first,
                                   with what the gap to the next start suggests about each
                                   video. Takeout logs only when a video was STARTED, so
                                   every label there is a reading of that gap, never a fact
-                                  (flags: -rules <file>, -taxonomy, -label-holes N to
-                                  list the N biggest unlabelled gaps)
+                                  (flags: -rules <file>, -taxonomy, -taxonomy-file
+                                  <path>, -label-holes N to list the N biggest
+                                  unlabelled gaps)
   youtubehistii version           print version
 
 Global flag (each subcommand): -data <dir>  data directory (default "data")
