@@ -117,3 +117,56 @@ func TestCmdRunChecksTheTaxonomyFirst(t *testing.T) {
 		t.Error("the run classified everything before noticing the missing taxonomy")
 	}
 }
+
+// TestCmdRunRefusesRetry: "run" registered -retry because it takes classify's
+// flags, then set it to "" before the first wave. The run looked normal, cost
+// hours, and re-asked nothing. A flag that does nothing is worse than one
+// that says no — so it now says no, and names the command that means it.
+func TestCmdRunRefusesRetry(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+
+	err := cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"), "-no-llm", "-retry", "no-sub"})
+	if err == nil {
+		t.Fatal("run accepted -retry and returned no error")
+	}
+	if !strings.Contains(err.Error(), "classify -retry no-sub") {
+		t.Errorf("the refusal does not name the command that would work: %v", err)
+	}
+	// It has to refuse BEFORE the work, or the advice arrives after the hours
+	// it was supposed to save.
+	if _, statErr := os.Stat(p.classifiedJSONL()); statErr == nil {
+		t.Error("the run classified everything before refusing the flag")
+	}
+}
+
+// TestCmdRunEndsOnTheWhatNowLine: a finished run used to stop on a path and
+// leave the next step to memory — which retry selector, whether the taxonomy
+// needs rebuilding. The line is printed from the pass's own counters, so it
+// cannot advertise a selector that would select nothing.
+func TestCmdRunEndsOnTheWhatNowLine(t *testing.T) {
+	t.Chdir(t.TempDir())
+	dataDir := t.TempDir()
+	p := paths{dataDir: dataDir}
+	writeRunFixture(t, p)
+
+	out, err := captureStdout(t, func() error {
+		return cmdRun([]string{"-data", dataDir, "-rules", filepath.Join(dataDir, "rules.yaml"), "-no-llm"})
+	})
+	if err != nil {
+		t.Fatalf("cmdRun: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "next:") {
+		t.Errorf("the run never said what comes next:\n%s", out)
+	}
+	// -no-llm over a fixture whose every video gets its area from the Music
+	// category: no model answered anything, so no retry selector applies and
+	// offering one would be advice that does nothing.
+	for _, unwanted := range []string{"-retry no-sub", "-retry no-mode"} {
+		if strings.Contains(out, unwanted) {
+			t.Errorf("a run with no model verdicts offered %q:\n%s", unwanted, out)
+		}
+	}
+}

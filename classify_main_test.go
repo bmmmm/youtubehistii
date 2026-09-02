@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -497,5 +498,90 @@ func TestCollectSubSeedsSkipsDeadAreas(t *testing.T) {
 		if got[i] != want[i] {
 			t.Errorf("gaming seeds = %v, want %v (order is part of it)", got, want)
 		}
+	}
+}
+
+// TestPassStatsCountsOnlyWhatRetryCanReach pins the counters to retryTargets'
+// own predicate. A "next: N with an area but no sub" that overstates sends
+// someone into a five-hour re-ask for videos the selector will not pick, and
+// the run afterwards looks broken rather than finished. Four shapes, four
+// different reasons to count or not:
+//
+//   - an LLM verdict with an area and no sub: countable
+//   - the same, but already carrying the "sub" marker: asked once, done
+//   - a verdict a RULE produced: -retry never looks at rules
+//   - a video with no verdict at all, area from its YouTube category: its own
+//     bucket, because no selector re-asks it — enrich does
+func TestPassStatsCountsOnlyWhatRetryCanReach(t *testing.T) {
+	p := paths{dataDir: t.TempDir()}
+	cfg, err := rules.Load("config/rules.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	views := []takeout.View{
+		{VideoID: "nosubvideo1", Title: "some music", WatchedAt: time.Now()},
+		{VideoID: "askedalready", Title: "more music", WatchedAt: time.Now()},
+		{VideoID: "nomodevideo1", Title: "third music", WatchedAt: time.Now()},
+		{VideoID: "categoryonly", Title: "fourth music", WatchedAt: time.Now()},
+	}
+	metas := map[string]enrich.Meta{
+		"nosubvideo1":  {ID: "nosubvideo1", Categories: []string{"Music"}},
+		"askedalready": {ID: "askedalready", Categories: []string{"Music"}},
+		"nomodevideo1": {ID: "nomodevideo1", Categories: []string{"Music"}},
+		"categoryonly": {ID: "categoryonly", Categories: []string{"Music"}},
+	}
+	cached := map[string]classify.LLMVerdict{
+		"nosubvideo1":  {Topic: "music", Mode: "consume", Model: "m"},
+		"askedalready": {Topic: "music", Mode: "consume", Model: "m", Retried: []string{"sub"}},
+		"nomodevideo1": {Topic: "music/jazz", Model: "m"},
+		// "categoryonly" has no cached verdict at all.
+	}
+
+	st, err := classifyPass(p, cfg, views, metas, cached, classifyOpts{noLLM: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.noSub != 1 {
+		t.Errorf("noSub = %d, want 1 — the marked one was already asked, the category-only one is not a model's verdict", st.noSub)
+	}
+	if st.noMode != 1 {
+		t.Errorf("noMode = %d, want 1", st.noMode)
+	}
+	if st.categoryOnly != 1 {
+		t.Errorf("categoryOnly = %d, want 1", st.categoryOnly)
+	}
+}
+
+func TestNextLineNamesOnlyTheSelectorsItCanFill(t *testing.T) {
+	// Nothing left: the tail still names the stages that come next, because
+	// they come next either way.
+	empty := passStats{}.nextLine()
+	for _, unwanted := range []string{"-retry no-sub", "-retry no-mode", "-include-unenriched"} {
+		if strings.Contains(empty, unwanted) {
+			t.Errorf("a pass with nothing outstanding still offered %q: %s", unwanted, empty)
+		}
+	}
+	for _, want := range []string{"taxonomy", "watchpath -taxonomy"} {
+		if !strings.Contains(empty, want) {
+			t.Errorf("the tail does not name %q: %s", want, empty)
+		}
+	}
+
+	full := passStats{noSub: 3, noMode: 4, categoryOnly: 5}.nextLine()
+	for _, want := range []string{"3 with an area but no sub", "classify -retry no-sub",
+		"4 without a mode", "classify -retry no-mode", "5 carry only their category's area",
+		"-include-unenriched"} {
+		if !strings.Contains(full, want) {
+			t.Errorf("the line does not carry %q: %s", want, full)
+		}
+	}
+
+	// One clause at a time, so a count of zero cannot smuggle in a selector
+	// that would select nothing.
+	if line := (passStats{noSub: 1}).nextLine(); strings.Contains(line, "no-mode") {
+		t.Errorf("a pass with no missing modes offered -retry no-mode: %s", line)
+	}
+	if line := (passStats{noMode: 1}).nextLine(); strings.Contains(line, "no-sub") {
+		t.Errorf("a pass with no missing subs offered -retry no-sub: %s", line)
 	}
 }

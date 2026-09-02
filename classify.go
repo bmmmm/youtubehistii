@@ -90,8 +90,12 @@ func cmdClassify(args []string) error {
 	opts := lf.opts()
 	opts.includeUnenriched = *lf.includeUnenriched
 	opts.progress = true
-	_, err = classifyPass(p, cfg, views, metas, cached, opts)
-	return err
+	st, err := classifyPass(p, cfg, views, metas, cached, opts)
+	if err != nil {
+		return err
+	}
+	fmt.Println(st.nextLine())
+	return nil
 }
 
 // classifyOpts configures one classifyPass; "run" reuses it wave after wave.
@@ -123,9 +127,41 @@ type passStats struct {
 	unique     int // unique videos with an id
 	classified int // unique videos with a verdict (rules + llm)
 	ruleHits   int
-	llmNew     int // live LLM verdicts gained this pass
+	llmNew     int // live LLM verdicts gained this pass (full asks)
+	llmSub     int // sub answers merged in by a "-retry no-sub" round
+	llmMode    int // mode answers merged in by a "-retry no-mode" round
 	waiting    int // unenriched videos skipped until enrich delivers metadata
 	llmDown    bool
+
+	// What is left to re-ask, counted the way retryTargets selects: only
+	// verdicts a model answered, only defects no marker says were already
+	// asked once. A number that merely looked plausible would send someone
+	// on a five-hour run for nothing.
+	noSub        int // an area, no sub — what "-retry no-sub" would pick up
+	noMode       int // a topic, no mode — what "-retry no-mode" would pick up
+	categoryOnly int // area from the YouTube category alone; no model has seen them
+}
+
+// nextLine says what is left and with which selector. Clauses appear only
+// when they have a count; the tail always does, because the taxonomy and the
+// page are the next stages whether or not anything is missing.
+//
+// It is a pure function of the counters on purpose: the numbers it prints are
+// the ones the pass measured, so a test can hold the sentence against them
+// without running a pass.
+func (s passStats) nextLine() string {
+	var parts []string
+	if s.noSub > 0 {
+		parts = append(parts, fmt.Sprintf("%d with an area but no sub — classify -retry no-sub", s.noSub))
+	}
+	if s.noMode > 0 {
+		parts = append(parts, fmt.Sprintf("%d without a mode — classify -retry no-mode", s.noMode))
+	}
+	if s.categoryOnly > 0 {
+		parts = append(parts, fmt.Sprintf("%d carry only their category's area (they are waiting for metadata — enrich, or classify -include-unenriched)", s.categoryOnly))
+	}
+	parts = append(parts, `then "taxonomy", then "watchpath -taxonomy"`)
+	return "next: " + strings.Join(parts, "; ")
 }
 
 // classifyPass runs one full classification over views: rules first, then the
@@ -595,6 +631,7 @@ func (r *pass) askSubs(client *omlx.Client, llmCache classify.Cache, ids []strin
 			next.Topic = r.verdicts[id].topic + "/" + a.Sub
 			next.Confidence = a.Confidence
 			got++
+			r.st.llmSub++
 		}
 		if err := llmCache.Write(id, next); err != nil {
 			return err
@@ -704,6 +741,7 @@ func (r *pass) askModes(client *omlx.Client, llmCache classify.Cache, ids []stri
 		if mode != "" {
 			next.Mode = mode
 			got++
+			r.st.llmMode++
 		} else {
 			still++
 		}
@@ -973,6 +1011,25 @@ func (r *pass) write() error {
 	}
 	if categoryOnly > 0 && r.opts.progress {
 		fmt.Printf("%d videos carry their category's area but no sub or mode yet\n", categoryOnly)
+	}
+	r.st.categoryOnly = categoryOnly
+
+	// Read-only, and deliberately here rather than in the retry stage: this
+	// counts what the NEXT run would select, over the verdicts about to be
+	// written. The predicate is retryTargets' own, minus the selector — a
+	// model's verdict, a defect, and no marker saying that defect was already
+	// asked once. Anything looser would name a number no -retry run can meet.
+	for id, vv := range r.verdicts {
+		if !strings.HasPrefix(vv.source, "llm:") || vv.topic == "unclear" {
+			continue
+		}
+		cv := r.cached[id]
+		if !strings.Contains(vv.topic, "/") && !slices.Contains(cv.Retried, "sub") {
+			r.st.noSub++
+		}
+		if vv.mode == "" && !slices.Contains(cv.Retried, "mode") {
+			r.st.noMode++
+		}
 	}
 
 	r.st.classified = len(r.verdicts)

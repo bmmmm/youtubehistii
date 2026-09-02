@@ -25,6 +25,15 @@ func cmdRun(args []string) error {
 	fs.Parse(args)
 	p := paths{dataDir: *dataDir}
 
+	// -retry used to be accepted here and silently dropped two screens down.
+	// A wave re-classifies whatever enrich has just delivered; a targeted
+	// re-ask mixed into that would re-ask the same defects once per wave. So
+	// it is refused rather than ignored — a flag that does nothing is worse
+	// than one that says no, because the run afterwards looks like it worked.
+	if *lf.retry != "" {
+		return fmt.Errorf("-retry belongs to \"classify\", not to \"run\": a wave re-classifies what enrich just delivered, so a targeted re-ask would run once per wave. Let this run finish, then: classify -retry %s", *lf.retry)
+	}
+
 	cfg, err := loadRules(*lf.rulesPath)
 	if err != nil {
 		return err
@@ -86,10 +95,6 @@ func cmdRun(args []string) error {
 	}
 
 	baseOpts := lf.opts()
-	// Wave mode is not retry mode: a wave re-classifies whatever enrich just
-	// delivered, and mixing targeted re-asks into that would re-ask the same
-	// defects once per wave.
-	baseOpts.retry = ""
 	wave := 0
 	asked := 0
 	var prev passStats
@@ -109,7 +114,7 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return err
 		}
-		asked += st.llmNew
+		asked += st.llmNew + st.llmSub + st.llmMode
 		line := fmt.Sprintf("wave %d: +%d classified (llm %d, rules %d), %d waiting",
 			wave, st.classified-prev.classified, st.llmNew, st.ruleHits-prev.ruleHits, st.waiting)
 		if st.llmDown && !opts.noLLM {
@@ -170,6 +175,11 @@ loop:
 			fmt.Fprintf(os.Stderr, "enrich stopped: %v\n", enrichErr)
 		}
 		fmt.Println("interrupted — progress is cached, rerun \"run\" to resume")
+		fmt.Println(prev.nextLine())
+		// What is already classified is already worth looking at. Without
+		// this the run ends on "rerun", and the CSV and the page that the
+		// finished waves have earned go unmentioned.
+		fmt.Println(`or read what is already there: "report", then "watchpath"`)
 		return nil
 	}
 
@@ -187,8 +197,9 @@ loop:
 	if err := runWave(); err != nil {
 		return err
 	}
+	fmt.Println(prev.nextLine())
 	if enrichErr != nil {
-		return fmt.Errorf("enrich: %w (classification progress is cached — rerun \"run\" to resume)", enrichErr)
+		return fmt.Errorf("enrich: %w (classification progress is cached — rerun \"run\" to resume, or read what is there with \"report\" and \"watchpath\")", enrichErr)
 	}
 	// Both stages read the SAME taxonomy switch: a terminal summary folded
 	// differently from the page it points at would be two answers to one
